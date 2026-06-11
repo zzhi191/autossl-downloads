@@ -1,0 +1,61 @@
+name: AutoSSL Windows Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+    paths:
+      - '.github/workflows/autossl-windows-build.yml'
+      - '**'
+  pull_request:
+    paths:
+      - '.github/workflows/autossl-windows-build.yml'
+      - '**'
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Replace local plugin-lib dependency for CI
+        run: |
+          node -e "const fs=require('fs'); const pkg=require('./package.json'); pkg.dependencies['@certd/plugin-lib']='1.37.7'; fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build renderer
+        run: npm run build
+
+      - name: Build Windows installer
+        run: npm run electron:build:win
+
+      - name: Upload Windows bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: autossl-windows-bundle
+          path: |
+            dist-electron/*.exe
+            dist-electron/*.blockmap
+            dist-electron/latest*.yml
+          if-no-files-found: error
