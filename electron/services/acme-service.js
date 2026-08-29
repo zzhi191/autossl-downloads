@@ -192,21 +192,27 @@ async function applyCert(domain, email, dnsProvider, onProgress = () => { }, cac
                 log('dns-wait', 'processing', '获取权威 NS 失败，使用阿里公共 DNS 兜底')
             }
 
-            const resolver = new dns.Resolver()
-            resolver.setServers(nsServers)
+                const maxAttempts = 40; // 增加到 40 次，约 6.5 分钟
+                for (let i = 0; i < maxAttempts; i++) {
+                    await new Promise(resolve => setTimeout(resolve, 8000)) // 稍微延长单次间隔
+                    try {
+                        const fullDomain = `${rr}.${mainDomain}`
+                        const authoritativeResults = await Promise.all(nsServers.map(async nsServer => {
+                            try {
+                                const resolver = new dns.Resolver()
+                                resolver.setServers([nsServer])
+                                const records = await resolver.resolveTxt(fullDomain)
+                                return records.map(r => r.join(''))
+                            } catch (error) {
+                                return []
+                            }
+                        }))
+                        const flatRecords = authoritativeResults.flat()
 
-            const maxAttempts = 40; // 增加到 40 次，约 6.5 分钟
-            for (let i = 0; i < maxAttempts; i++) {
-                await new Promise(resolve => setTimeout(resolve, 8000)) // 稍微延长单次间隔
-                try {
-                    const fullDomain = `${rr}.${mainDomain}`
-                    const records = await resolver.resolveTxt(fullDomain)
-                    const flatRecords = records.map(r => r.join(''))
+                        log('dns-wait', 'processing', `权威 DNS 查询结果: ${flatRecords.length > 0 ? flatRecords.join(', ') : '空'}（${authoritativeResults.map((records, index) => `${nsServers[index]}:${records.length > 0 ? '已同步' : '未同步'}`).join(', ')}）`)
 
-                    log('dns-wait', 'processing', `权威 DNS 查询结果: ${flatRecords.length > 0 ? flatRecords.join(', ') : '空'}`)
-
-                    // 核心逻辑：查询结果中必须包含预期的 dnsRecordValue
-                    if (flatRecords.includes(dnsRecordValue)) {
+                        // 核心逻辑：所有权威 NS 都必须包含预期值，避免某台 NS 未同步导致 CA 二次验证 SERVFAIL。
+                        if (authoritativeResults.every(result => result.includes(dnsRecordValue))) {
                         log('dns-wait', 'processing', `✅ DNS 记录验证成功 (检测到预期值)`)
 
                         // 如果记录数大于1，说明还有旧记录干扰

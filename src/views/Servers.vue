@@ -171,6 +171,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { message, Modal, Popconfirm as APopconfirm } from 'ant-design-vue'
+import axios from 'axios'
 import { 
   PlusOutlined, 
   EditOutlined, 
@@ -182,6 +183,8 @@ import {
 } from '@ant-design/icons-vue'
 import MainLayout from '@/components/MainLayout.vue'
 
+const API_BASE = 'https://tools.fogomo.com/api'
+const APP_CODE = 'certd-electron'
 const loading = ref(false)
 const servers = ref([])
 const modalVisible = ref(false)
@@ -193,6 +196,34 @@ const verifyModalVisible = ref(false)
 const verifyPassword = ref('')
 const verifying = ref(false)
 const pendingDeleteItem = ref(null)
+
+const getCurrentUserEmail = () => {
+  const userStr = localStorage.getItem('user')
+  if (!userStr) return ''
+
+  try {
+    const user = JSON.parse(userStr)
+    return user.email || ''
+  } catch (e) {
+    return ''
+  }
+}
+
+const getAuthPayload = (response) => response?.data?.data || response?.data || {}
+
+const verifyRemotePassword = async (password) => {
+  const email = getCurrentUserEmail()
+  if (!email || email === 'admin') {
+    throw new Error('请先使用远程账号登录')
+  }
+
+  const res = await axios.post(`${API_BASE}/auth/login`, {
+    email,
+    pass: password,
+    appCode: APP_CODE
+  })
+  return Boolean(getAuthPayload(res).access_token)
+}
 
 const form = ref({
   name: '',
@@ -279,7 +310,7 @@ const selectPrivateKeyFile = async () => {
   try {
     const result = await window.electron.ipcRenderer.invoke('dialog:open-file', {
       title: '选择SSH私钥文件',
-      defaultPath: require('os').homedir() + '/.ssh',
+      defaultPath: '~/.ssh',
       filters: [
         { name: 'All Files', extensions: ['*'] }
       ],
@@ -360,18 +391,7 @@ const handleVerifyAndDelete = async () => {
   
   verifying.value = true
   try {
-    // 获取当前用户信息
-    let username = 'admin'
-    try {
-      const userStr = localStorage.getItem('user')
-      if (userStr) {
-        const user = JSON.parse(userStr)
-        if (user.email) username = user.email
-      }
-    } catch(e) {}
-
-    // 验证密码
-    const isValid = await window.electron.ipcRenderer.invoke('admin:login', username, verifyPassword.value)
+    const isValid = await verifyRemotePassword(verifyPassword.value)
     
     if (isValid) {
       // 密码验证通过，执行删除
@@ -533,4 +553,3 @@ const handleVerifyAndDelete = async () => {
   padding: 0;
 }
 </style>
-

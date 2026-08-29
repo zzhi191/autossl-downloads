@@ -14,14 +14,15 @@
 - ✅ 自动部署证书到远程服务器
 - ✅ SQLite 本地数据存储
 - ✅ 数据加密存储
-- ✅ 直接使用 certd 的 acme-client 和 plugin-lib
+- ✅ 使用 certd 的 acme-client，并内置 DNS/SSH 部署实现
 
 ## 当前打包状态
 
 - macOS：本地打包脚本和 GitHub Actions workflow 已补齐
 - Windows：本地打包脚本和 GitHub Actions workflow 已补齐
 - Draft Release：已升级为 macOS + Windows 双平台 draft release workflow
-- 当前边界：仍然是 unsigned desktop release，且我只做了本地 YAML / 配置校验，还没有在 GitHub Actions 上完整实跑验证
+- macOS Release：生成可安装的 `.dmg` 和 `.zip`，不走 Mac App Store
+- 当前边界：未签名 DMG 可用于直接下载/内部安装；首次打开可能触发 macOS Gatekeeper 提示
 
 ## 快速开始
 
@@ -128,27 +129,18 @@ macOS Build 会：
 3. 创建一个 draft GitHub Release
 4. 一次性附带上传 Windows 和 macOS 安装包及升级元数据
 
-注意：当前生成的是 **unsigned desktop release**，可以下载和测试，但还没有接入 Windows 签名证书，也没有接入 macOS 签名与 notarization。
+注意：当前目标是生成可安装的 DMG，不发布 Mac App Store。未签名/未公证的 DMG 仍可安装，但用户首次打开时可能需要在系统设置里允许打开；后续如果要减少 Gatekeeper 提示，可以再走可选的 Developer ID 签名和 notarization。
 
 完整发布流程、最短路径、tag 规范和 release 检查项已经整理到：
 
 - [RELEASE.md](./RELEASE.md)
 - [GITHUB_ACTIONS_RUNBOOK.md](./GITHUB_ACTIONS_RUNBOOK.md)
 
-### 关于 `@certd/plugin-lib`
-
-当前 `autoSSL/package.json` 在本地开发中引用了 `file:../packages/plugins/plugin-lib`。由于当前仓库没有把这个本地目录提交进来，GitHub Actions 中会临时改用 npm 上已发布的 `@certd/plugin-lib@1.37.7` 来完成桌面打包。
-
 ### 延伸阅读
 
 如果你想看这次 GitHub Windows 打包和 Draft Release 的完整落地过程、踩坑点与触发方式说明，可以直接看这篇文章：
 
 - 博客地址：https://yijiebuyi.com/blog/autossl-github-windows-build-release/
-
-## 默认登录信息
-
-- 用户名：`admin`
-- 密码：`zhangzhi.net`
 
 ## 项目结构
 
@@ -160,7 +152,7 @@ certd-electron/
 │   ├── db.js            # SQLite 数据库
 │   └── services/        # 服务模块
 │       ├── acme-service.js    # ACME 证书申请（使用 certd 的 acme-client）
-│       ├── ssh-service.js     # SSH 部署（使用 certd 的 plugin-lib）
+│       ├── ssh-service.js     # SSH 部署
 │       └── cert-service.js   # 证书管理
 ├── src/                  # 前端代码
 │   ├── views/           # 页面组件
@@ -173,16 +165,16 @@ certd-electron/
 
 1. **添加服务器**：配置 SSH 连接信息和证书部署路径
 2. **申请证书**：通过 ACME 协议申请 SSL 证书（使用 certd 的 acme-client）
-3. **部署证书**：自动将证书部署到远程服务器（使用 certd 的 plugin-lib）
+3. **部署证书**：自动将证书部署到远程服务器
 4. **监控过期**：自动监控证书过期时间，及时提醒
 
 ## 技术栈
 
-- Electron 28
+- Electron 40
 - Vue 3
 - Ant Design Vue
 - Better-SQLite3
-- 直接引用 certd 的 `@certd/acme-client` 和 `@certd/plugin-lib`
+- 使用 certd 的 `@certd/acme-client`
 
 ## 注意事项
 
@@ -193,13 +185,4 @@ certd-electron/
 
 ## 开发说明
 
-由于项目在同一个 monorepo 下，可以直接引用 certd 的包：
-
-```json
-{
-  "@certd/acme-client": "file:../packages/core/acme-client",
-  "@certd/plugin-lib": "file:../packages/plugins/plugin-lib"
-}
-```
-
-这样可以直接使用 certd 的核心功能，无需重新实现。
+ACME 申请使用 `@certd/acme-client`，DNS 服务商和 SSH 部署逻辑由当前客户端内置实现。

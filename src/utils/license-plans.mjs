@@ -22,3 +22,17 @@ export const normalizeLicensePlans = (payload) => {
   })
 }
 
+export const unwrapLicenseApiResponse = (payload) => {
+  if (
+    payload &&
+    typeof payload === 'object' &&
+    payload.data &&
+    typeof payload.data === 'object' &&
+    !Array.isArray(payload.data) &&
+    ('code' in payload || 'msg' in payload)
+  ) {
+    return payload.data
+  }
+
+  return payload
+}

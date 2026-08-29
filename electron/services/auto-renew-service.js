@@ -3,7 +3,8 @@
  * 每天检测证书过期时间，小于10天自动申请并部署
  */
 
-const { Notification } = require('electron')
+const { app, Notification } = require('electron')
+const fs = require('fs')
 const path = require('path')
 const psl = require('psl')
 
@@ -165,6 +166,22 @@ function isDomainMismatchError(error) {
   ].some(token => errorText.includes(token))
 }
 
+function emitProgress(onProgress, step, status, message) {
+  try {
+    onProgress({ step, status, message })
+  } catch (error) {
+    console.warn('[Auto-Renew] Progress callback failed:', error.message)
+  }
+}
+
+function prepareAcmeRuntime() {
+  // @certd/basic writes logs to ./logs/app.log. Finder-launched apps can start
+  // from /, where streamroller recursively retries creating its log directory.
+  const userDataPath = app.getPath('userData')
+  fs.mkdirSync(path.join(userDataPath, 'logs'), { recursive: true })
+  process.chdir(userDataPath)
+}
+
 /**
  * 初始化自动续期服务
  */
@@ -256,10 +273,11 @@ async function checkAndRenew(userId = 'default') {
  * 续期单个证书
  */
 async function renewCertificate(cert, userId = 'default', options = {}) {
-  const { manual = false, fallbackEmail = '' } = options
+  const { manual = false, fallbackEmail = '', onProgress = () => {} } = options
   const domain = cert.domain
 
   try {
+    emitProgress(onProgress, 'init', 'processing', `正在准备续期 ${domain}...`)
     const applyConfigCandidates = []
     appendConfigCandidate(
       applyConfigCandidates,
@@ -297,7 +315,9 @@ async function renewCertificate(cert, userId = 'default', options = {}) {
 
     showNotification('证书自动续期开始', `正在为 ${domain} 自动续期证书...`)
     console.log(`[Auto-Renew] Starting automatic renewal for ${domain}`)
+    emitProgress(onProgress, 'init', 'processing', '正在加载证书申请配置...')
 
+    prepareAcmeRuntime()
     const { default: Store } = await import('electron-store')
     const store = new Store({ name: `config-${userId}` })
     const acmeAccount = store.get('acmeAccount')
@@ -322,12 +342,14 @@ async function renewCertificate(cert, userId = 'default', options = {}) {
 
       try {
         console.log(`[Auto-Renew] Trying apply config from ${candidate.source || 'unknown'} using provider ${candidate.provider}`)
+        emitProgress(onProgress, 'init', 'processing', `正在使用 ${candidate.provider} 重新申请证书...`)
         result = await AcmeService.applyCert(
           domain,
           candidateEmail,
           dnsProvider,
           (progress) => {
             console.log(`[Auto-Renew] ${domain} - ${progress.step}: ${progress.message}`)
+            emitProgress(onProgress, progress.step, progress.status, progress.message)
           },
           acmeAccount
         )
@@ -354,6 +376,7 @@ async function renewCertificate(cert, userId = 'default', options = {}) {
     }
 
     console.log(`[Auto-Renew] Certificate renewed for ${domain}`)
+    emitProgress(onProgress, 'success', 'success', '证书续期签发成功，正在更新本地证书库...')
 
     // 4. 更新证书记录
     const newCert = {
@@ -377,8 +400,13 @@ async function renewCertificate(cert, userId = 'default', options = {}) {
       accessKeySecret: applyConfig.accessKeySecret
     }, userId)
 
+    const mergeResult = certdDB.mergeDuplicateCertsByDomain(domain, cert.id, userId)
+    if (mergeResult.removedCerts > 0) {
+      console.log(`[Auto-Renew] Merged ${mergeResult.removedCerts} duplicate certificate record(s) for ${domain}`)
+    }
+
     // 6. 自动部署到所有已配置的服务器
-    await deployToAllServers(cert.id, newCert, userId)
+    await deployToAllServers(cert.id, newCert, userId, onProgress)
 
     certdDB.addApplyLog({
       id: Date.now().toString(),
@@ -388,12 +416,14 @@ async function renewCertificate(cert, userId = 'default', options = {}) {
     }, userId)
 
     showNotification('证书自动续期成功', `${domain} 已自动续期并部署到所有服务器`)
+    emitProgress(onProgress, 'done', 'success', '续期流程完成。')
 
     // 7. 上报续期成功到云端
     LicenseService.report(domain, true, '自动续期成功').catch(() => { });
 
   } catch (error) {
     console.error(`[Auto-Renew] Failed to renew ${domain}:`, error)
+    emitProgress(onProgress, 'error', 'error', `续期失败: ${error.message}`)
     showNotification('证书自动续期失败', `${domain}: ${error.message}`)
 
     // 记录错误日志
@@ -413,21 +443,24 @@ async function renewCertificate(cert, userId = 'default', options = {}) {
 /**
  * 部署到所有已配置的服务器
  */
-async function deployToAllServers(certId, cert, userId = 'default') {
+async function deployToAllServers(certId, cert, userId = 'default', onProgress = () => {}) {
   const deployedServers = certdDB.getCertDeployedServers(certId, userId)
 
   if (!deployedServers || deployedServers.length === 0) {
     console.log(`[Auto-Renew] No deployment configs found for cert ${certId}`)
+    emitProgress(onProgress, 'deploy', 'warning', '当前证书未配置部署服务器，已跳过自动部署。')
     return
   }
 
   console.log(`[Auto-Renew] Deploying to ${deployedServers.length} server(s)...`)
+  emitProgress(onProgress, 'deploy', 'processing', `检测到 ${deployedServers.length} 个部署任务，正在开始部署...`)
 
   for (const serverConfig of deployedServers) {
     try {
       const server = certdDB.getServer(serverConfig.id, userId)
       if (!server) {
         console.log(`[Auto-Renew] Server ${serverConfig.id} not found, skipping`)
+        emitProgress(onProgress, 'deploy', 'warning', `服务器 ${serverConfig.id} 不存在，已跳过。`)
         continue
       }
 
@@ -438,8 +471,13 @@ async function deployToAllServers(certId, cert, userId = 'default') {
         passphrase: serverConfig.passphrase
       }
 
-      await SshService.deployCert(deployServer, cert)
+      emitProgress(onProgress, 'deploy', 'processing', `正在部署到服务器 [${server.name}]...`)
+      const result = await SshService.deployCert(deployServer, cert)
       console.log(`[Auto-Renew] Deployed to ${server.name} successfully`)
+      const deployedMessage = result?.paths
+        ? `部署成功: ${server.name}${result.paths.certPath ? ` | cert=${result.paths.certPath}` : ''}${result.paths.keyPath ? ` | key=${result.paths.keyPath}` : ''}`
+        : `部署成功: ${server.name}`
+      emitProgress(onProgress, 'deploy', 'success', deployedMessage)
 
       // 记录部署日志
       certdDB.addDeployLog({
@@ -452,6 +490,7 @@ async function deployToAllServers(certId, cert, userId = 'default') {
 
     } catch (error) {
       console.error(`[Auto-Renew] Deploy to ${serverConfig.name || serverConfig.id} failed:`, error)
+      emitProgress(onProgress, 'deploy', 'error', `服务器 [${serverConfig.name || serverConfig.id}] 部署失败: ${error.message}`)
 
       // 记录部署失败日志
       certdDB.addDeployLog({
@@ -487,7 +526,7 @@ function manualCheck(userId = 'default') {
   return checkAndRenew(userId)
 }
 
-async function renewNow(certId, userId = 'default', fallbackEmail = '') {
+async function renewNow(certId, userId = 'default', fallbackEmail = '', onProgress = () => {}) {
   if (!certdDB) {
     throw new Error('数据库未初始化')
   }
@@ -501,7 +540,7 @@ async function renewNow(certId, userId = 'default', fallbackEmail = '') {
     throw new Error('未找到要续期的证书记录。')
   }
 
-  await renewCertificate(cert, userId, { manual: true, fallbackEmail })
+  await renewCertificate(cert, userId, { manual: true, fallbackEmail, onProgress })
   return { success: true, message: `${cert.domain} 已开始立即续期。` }
 }
 

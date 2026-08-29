@@ -29,12 +29,12 @@ async function deployCert(server, cert) {
 
         // 执行部署流程
         deployFiles(conn, server, tmpCrtPath, tmpKeyPath)
-          .then(() => {
+          .then((deployedPaths) => {
             // 清理临时文件
             fs.unlinkSync(tmpCrtPath)
             fs.unlinkSync(tmpKeyPath)
             conn.end()
-            resolve({ success: true, message: '部署成功' })
+            resolve({ success: true, message: '部署成功', paths: deployedPaths })
           })
           .catch(err => {
             // 清理临时文件
@@ -68,14 +68,12 @@ async function deployCert(server, cert) {
     // 优先使用 keyPassphrase（来自服务器配置），其次使用 passphrase（来自部署配置）
     const effectivePassphrase = server.keyPassphrase || server.passphrase
     if (effectivePassphrase && typeof effectivePassphrase === 'string' && effectivePassphrase.trim() !== '') {
-      console.log('Passphrase provided (length: ' + effectivePassphrase.length + ')')
       connectConfig.passphrase = effectivePassphrase
     }
 
     // 优先使用私钥文件路径，其次使用直接存储的私钥内容（向后兼容）
     let pk = null
     if (server.privateKeyPath) {
-      console.log('Using Private Key from file path:', server.privateKeyPath)
       try {
         // 处理 ~ 开头的路径
         let keyPath = server.privateKeyPath
@@ -83,12 +81,10 @@ async function deployCert(server, cert) {
           keyPath = keyPath.replace('~', os.homedir())
         }
         pk = fs.readFileSync(keyPath, 'utf8')
-        console.log('Successfully read private key file, length:', pk.length)
       } catch (err) {
         return reject(new Error(`无法读取私钥文件 ${server.privateKeyPath}: ${err.message}`))
       }
     } else if (server.privateKey) {
-      console.log('Using Private Key from stored content')
       pk = typeof server.privateKey === 'string' ? server.privateKey : server.privateKey.toString()
 
       // 检查解密状态
@@ -131,25 +127,13 @@ async function deployCert(server, cert) {
           const cipher = readString(buffer, pos)
           const kdf = readString(buffer, cipher.next)
 
-          console.log(`[DEBUG] OpenSSH Internal Detection:`)
-          console.log(`- Magic: "${buffer.slice(0, 14).toString()}"`)
-          console.log(`- Cipher: "${cipher.val}"`)
-          console.log(`- KDF: "${kdf.val}"`)
-
           if (cipher.val !== 'none' && !connectConfig.passphrase) {
-            console.error(`[CRITICAL] 该私钥使用了 "${cipher.val}" 加密，但您没有提供私钥密码(Passphrase)！这会导致解析失败。`)
+            console.warn('私钥已加密，但未提供私钥密码(Passphrase)，可能导致连接失败。')
           }
         } catch (e) {
-          console.error('[DEBUG] Failed to perform deep binary diagnostic:', e.message)
+          console.warn('无法检测私钥加密状态。')
         }
       }
-
-      const debugLines = pk.split('\n')
-      console.log(`[DEBUG] Final Private Key Structure:`)
-      console.log(`- Header: "${debugLines[0]}"`)
-      console.log(`- Footer: "${debugLines[debugLines.length - 1]}"`)
-      console.log(`- Total Lines: ${debugLines.length}`)
-      console.log(`- Passphrase Status: ${connectConfig.passphrase ? 'SET' : 'NOT SET'}`)
 
       connectConfig.privateKey = pk
     } else if (server.password) {
@@ -187,33 +171,40 @@ async function deployFiles(conn, server, tmpCrtPath, tmpKeyPath) {
           }
 
           const remoteTmpDir = '/tmp' // 远程临时目录，通常有写权限
+          const deployedPaths = {}
 
           // 2. 处理证书文件
           if (server.certPath) {
-            const certDir = path.dirname(server.certPath)
+            const resolvedCertPath = await resolveRemoteTargetPath(conn, server.certPath, 'public.pem')
+            const certDir = path.posix.dirname(resolvedCertPath)
             const remoteTmpCertPath = `${remoteTmpDir}/cert_${Date.now()}.crt`
 
             console.log(`上传证书到临时路径: ${remoteTmpCertPath}`)
             await uploadFile(sftp, tmpCrtPath, remoteTmpCertPath)
 
-            console.log(`[sudo] 创建目录并移动证书: ${server.certPath}`)
+            console.log(`[sudo] 创建目录并移动证书: ${resolvedCertPath}`)
             await execCommand(conn, `sudo mkdir -p "${certDir}"`)
-            await execCommand(conn, `sudo mv "${remoteTmpCertPath}" "${server.certPath}"`)
-            await execCommand(conn, `sudo chmod 644 "${server.certPath}"`)
+            await execCommand(conn, `sudo mv "${remoteTmpCertPath}" "${resolvedCertPath}"`)
+            await execCommand(conn, `sudo chmod 644 "${resolvedCertPath}"`)
+            await verifyRemoteFile(conn, resolvedCertPath, '证书文件')
+            deployedPaths.certPath = resolvedCertPath
           }
 
           // 3. 处理私钥文件
           if (server.keyPath) {
-            const keyDir = path.dirname(server.keyPath)
+            const resolvedKeyPath = await resolveRemoteTargetPath(conn, server.keyPath, 'private.key')
+            const keyDir = path.posix.dirname(resolvedKeyPath)
             const remoteTmpKeyPath = `${remoteTmpDir}/key_${Date.now()}.key`
 
             console.log(`上传私钥到临时路径: ${remoteTmpKeyPath}`)
             await uploadFile(sftp, tmpKeyPath, remoteTmpKeyPath)
 
-            console.log(`[sudo] 创建目录并移动私钥: ${server.keyPath}`)
+            console.log(`[sudo] 创建目录并移动私钥: ${resolvedKeyPath}`)
             await execCommand(conn, `sudo mkdir -p "${keyDir}"`)
-            await execCommand(conn, `sudo mv "${remoteTmpKeyPath}" "${server.keyPath}"`)
-            await execCommand(conn, `sudo chmod 600 "${server.keyPath}"`)
+            await execCommand(conn, `sudo mv "${remoteTmpKeyPath}" "${resolvedKeyPath}"`)
+            await execCommand(conn, `sudo chmod 600 "${resolvedKeyPath}"`)
+            await verifyRemoteFile(conn, resolvedKeyPath, '私钥文件')
+            deployedPaths.keyPath = resolvedKeyPath
           }
 
           // 4. 执行后置命令（重载服务）
@@ -226,7 +217,7 @@ async function deployFiles(conn, server, tmpCrtPath, tmpKeyPath) {
             await execCommand(conn, sudoReload)
           }
 
-          resolve()
+          resolve(deployedPaths)
         } catch (error) {
           reject(error)
         }
@@ -251,6 +242,60 @@ function uploadFile(sftp, localPath, remotePath) {
       }
     })
   })
+}
+
+function shellEscape(value) {
+  return `'${String(value).replace(/'/g, `'\"'\"'`)}'`
+}
+
+async function resolveRemoteTargetPath(conn, targetPath, defaultFileName) {
+  const normalizedTarget = normalizeRemotePath(targetPath)
+  if (!normalizedTarget) {
+    throw new Error('部署路径不能为空')
+  }
+
+  if (looksLikeDirectoryPath(normalizedTarget)) {
+    return path.posix.join(normalizedTarget, defaultFileName)
+  }
+
+  const type = await detectRemotePathType(conn, normalizedTarget)
+  if (type === 'directory') {
+    return path.posix.join(normalizedTarget, defaultFileName)
+  }
+
+  return normalizedTarget
+}
+
+function normalizeRemotePath(targetPath) {
+  const rawPath = String(targetPath || '').trim()
+  if (!rawPath) return ''
+
+  const normalized = path.posix.normalize(rawPath)
+  if (rawPath.endsWith('/') && normalized !== '/') {
+    return `${normalized}/`
+  }
+  return normalized
+}
+
+function looksLikeDirectoryPath(targetPath) {
+  return targetPath.endsWith('/')
+}
+
+async function detectRemotePathType(conn, remotePath) {
+  const escapedPath = shellEscape(remotePath)
+  const result = await execCommand(
+    conn,
+    `if [ -d ${escapedPath} ]; then printf 'directory'; elif [ -e ${escapedPath} ]; then printf 'file'; else printf 'missing'; fi`
+  )
+  return result.trim()
+}
+
+async function verifyRemoteFile(conn, remotePath, label) {
+  const escapedPath = shellEscape(remotePath)
+  await execCommand(
+    conn,
+    `sudo test -s ${escapedPath} && printf '${label} verified'`
+  )
 }
 
 /**
@@ -343,4 +388,3 @@ module.exports = {
   deployCert,
   testConnection
 }
-

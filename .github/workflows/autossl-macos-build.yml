@@ -39,10 +39,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Replace local plugin-lib dependency for CI
-        run: |
-          node -e "const fs=require('fs'); const pkg=require('./package.json'); pkg.dependencies['@certd/plugin-lib']='1.37.7'; fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');"
-
       - name: Install dependencies
         run: npm install
 

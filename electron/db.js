@@ -1,10 +1,16 @@
 const Database = require('better-sqlite3')
 const crypto = require('crypto')
+const fs = require('fs')
 const path = require('path')
-const { app } = require('electron')
+const { app, safeStorage } = require('electron')
 
-// 加密密钥（应用启动时生成，基于机器特征）
-const ENCRYPTION_KEY = crypto.createHash('sha256')
+const ENCRYPTION_PREFIX = 'v2'
+const SAFE_STORAGE_PREFIX = `${ENCRYPTION_PREFIX}:safe:`
+const GCM_PREFIX = `${ENCRYPTION_PREFIX}:gcm:`
+let appSecretKey = null
+
+// 只用于读取历史数据。新数据不能继续使用固定机器特征派生密钥。
+const LEGACY_ENCRYPTION_KEY = crypto.createHash('sha256')
   .update(require('os').hostname() + 'certd-electron-secret-key')
   .digest()
 
@@ -13,11 +19,50 @@ const ENCRYPTION_KEY = crypto.createHash('sha256')
  */
 function encrypt(text) {
   if (!text) return ''
-  const iv = crypto.randomBytes(16)
-  const cipher = crypto.createCipheriv('aes-256-cbc', ENCRYPTION_KEY, iv)
+  if (safeStorage?.isEncryptionAvailable?.()) {
+    return `${SAFE_STORAGE_PREFIX}${safeStorage.encryptString(text).toString('base64')}`
+  }
+
+  return encryptWithLocalKey(text)
+}
+
+function encryptWithLocalKey(text) {
+  const iv = crypto.randomBytes(12)
+  const cipher = crypto.createCipheriv('aes-256-gcm', getAppSecretKey(), iv)
   let encrypted = cipher.update(text, 'utf8', 'hex')
   encrypted += cipher.final('hex')
-  return iv.toString('hex') + ':' + encrypted
+  const tag = cipher.getAuthTag()
+  return `${GCM_PREFIX}${iv.toString('hex')}:${tag.toString('hex')}:${encrypted}`
+}
+
+function getAppSecretKey() {
+  if (appSecretKey) return appSecretKey
+
+  const userDataPath = app.getPath('userData')
+  const keyPath = path.join(userDataPath, 'autossl-secret.key')
+  try {
+    const keyHex = fs.readFileSync(keyPath, 'utf8').trim()
+    const key = Buffer.from(keyHex, 'hex')
+    if (key.length === 32) {
+      appSecretKey = key
+      return appSecretKey
+    }
+  } catch (e) { /* key does not exist yet */ }
+
+  appSecretKey = crypto.randomBytes(32)
+  fs.mkdirSync(userDataPath, { recursive: true })
+  fs.writeFileSync(keyPath, appSecretKey.toString('hex'), { mode: 0o600 })
+  return appSecretKey
+}
+
+function decryptWithLocalKey(encrypted) {
+  const payload = encrypted.slice(GCM_PREFIX.length)
+  const [ivHex, tagHex, encryptedText] = payload.split(':')
+  const decipher = crypto.createDecipheriv('aes-256-gcm', getAppSecretKey(), Buffer.from(ivHex, 'hex'))
+  decipher.setAuthTag(Buffer.from(tagHex, 'hex'))
+  let decrypted = decipher.update(encryptedText, 'hex', 'utf8')
+  decrypted += decipher.final('utf8')
+  return decrypted
 }
 
 /**
@@ -26,10 +71,18 @@ function encrypt(text) {
 function decrypt(encrypted) {
   if (!encrypted) return ''
   try {
+    if (encrypted.startsWith(SAFE_STORAGE_PREFIX)) {
+      const payload = encrypted.slice(SAFE_STORAGE_PREFIX.length)
+      return safeStorage?.decryptString(Buffer.from(payload, 'base64')) || ''
+    }
+    if (encrypted.startsWith(GCM_PREFIX)) {
+      return decryptWithLocalKey(encrypted)
+    }
+
     const parts = encrypted.split(':')
     const iv = Buffer.from(parts[0], 'hex')
     const encryptedText = parts[1]
-    const decipher = crypto.createDecipheriv('aes-256-cbc', ENCRYPTION_KEY, iv)
+    const decipher = crypto.createDecipheriv('aes-256-cbc', LEGACY_ENCRYPTION_KEY, iv)
     let decrypted = decipher.update(encryptedText, 'hex', 'utf8')
     decrypted += decipher.final('utf8')
     return decrypted
@@ -45,6 +98,45 @@ function normalizeTimestampMs(value) {
   return timestamp < 1e12 ? timestamp * 1000 : timestamp
 }
 
+function validateRemoteDeploymentPath(targetPath, label) {
+  const normalizedPath = String(targetPath || '').trim()
+  if (!normalizedPath) {
+    throw new Error(`${label}不能为空`)
+  }
+  if (!normalizedPath.startsWith('/')) {
+    throw new Error(`${label}必须填写服务器绝对路径，例如 /etc/nginx/ssl/example.com/public.pem`)
+  }
+  return normalizedPath
+}
+
+function resolveBetterSqliteBinding() {
+  const packageRoot = path.dirname(require.resolve('better-sqlite3/package.json'))
+  const abi = process.versions.modules
+  const platform = process.platform
+  const arch = process.arch
+  const candidates = [
+    path.join(packageRoot, 'build', 'Release', 'better_sqlite3.node'),
+    path.join(packageRoot, 'lib', 'binding', `node-v${abi}-${platform}-${arch}`, 'better_sqlite3.node'),
+    path.join(packageRoot, 'bin', `${platform}-${arch}-${abi}`, 'better-sqlite3.node')
+  ]
+
+  return candidates.find(candidate => fs.existsSync(candidate)) || null
+}
+
+function openDatabase(dbPath) {
+  try {
+    return new Database(dbPath)
+  } catch (error) {
+    const nativeBinding = resolveBetterSqliteBinding()
+    if (!nativeBinding) {
+      throw error
+    }
+
+    console.warn('[DB] Default better-sqlite3 binding not found, falling back to:', nativeBinding)
+    return new Database(dbPath, { nativeBinding })
+  }
+}
+
 /**
  * 证书管理数据库类
  */
@@ -57,14 +149,14 @@ class CertdDatabase {
     console.log('📂 Database path:', dbPath)
 
     // 打开数据库
-    this.db = new Database(dbPath)
+    this.db = openDatabase(dbPath)
 
     // 初始化表结构
     this.initTables()
     this.initAuditLogs()
 
-    // 初始化管理员账户
-    this.initAdmin()
+    // 清理早期开发版本遗留的默认管理员口令
+    this.removeDefaultAdminAccount()
 
     console.log('✅ Certd database initialized')
   }
@@ -267,15 +359,21 @@ class CertdDatabase {
     const serverStmt = this.db.prepare("UPDATE servers SET user_id = ? WHERE user_id = 'admin'")
     const certStmt = this.db.prepare("UPDATE certificates SET user_id = ? WHERE user_id = 'admin'")
     const configStmt = this.db.prepare("UPDATE cert_apply_configs SET user_id = ? WHERE user_id = 'admin'")
-    const logStmt = this.db.prepare("UPDATE server_creation_logs SET user_id = ? WHERE user_id = 'admin'")
+    const applyLogStmt = this.db.prepare("UPDATE cert_apply_logs SET user_id = ? WHERE user_id = 'admin'")
+    const deployLogStmt = this.db.prepare("UPDATE deploy_logs SET user_id = ? WHERE user_id = 'admin'")
+    const auditLogStmt = this.db.prepare("UPDATE audit_logs SET user_id = ? WHERE user_id = 'admin'")
+    const creationLogStmt = this.db.prepare("UPDATE server_creation_logs SET user_id = ? WHERE user_id = 'admin'")
 
     const s = serverStmt.run(targetUserId).changes
     const c = certStmt.run(targetUserId).changes
     const conf = configStmt.run(targetUserId).changes
-    logStmt.run(targetUserId)
+    const applyLogs = applyLogStmt.run(targetUserId).changes
+    const deployLogs = deployLogStmt.run(targetUserId).changes
+    const auditLogs = auditLogStmt.run(targetUserId).changes
+    const creationLogs = creationLogStmt.run(targetUserId).changes
 
     console.log(`✅ Legacy data claimed by ${targetUserId}: ${s} servers, ${c} certificates`)
-    return { changes: s + c + conf }
+    return { changes: s + c + conf + applyLogs + deployLogs + auditLogs + creationLogs }
   }
 
   /**
@@ -326,49 +424,49 @@ LIMIT ?
     return stmt.all(effectiveUserId, limit)
   }
 
-  /**
-   * 初始化管理员账户（密码：zhangzhi.net）
-   */
-  initAdmin() {
-    const crypto = require('crypto')
-    const password = 'zhangzhi.net'
-    // 使用 MD5 加密（与 certd 保持一致）
-    const hashedPassword = crypto.createHash('md5').update(password).digest('hex')
-    const username = 'zzhi.net@gmail.com'
-
-    // 1. 尝试将旧账号 'admin' 改名（如果新账号还不存在）
-    try {
-      this.db.prepare("UPDATE OR IGNORE admin SET username = ? WHERE username = 'admin'").run(username)
-    } catch (e) {
-      console.warn('Failed to rename admin account:', e.message)
+  getLocalAdminDataSummary() {
+    const count = (table) => {
+      try {
+        return this.db.prepare(`SELECT COUNT(*) as count FROM ${table} WHERE user_id = 'admin'`).get().count
+      } catch (e) {
+        return 0
+      }
     }
 
-    // 2. 如果新旧账号都存在，删除旧的 'admin'（防止以后冲突）
-    try {
-      this.db.prepare("DELETE FROM admin WHERE username = 'admin' AND EXISTS (SELECT 1 FROM admin WHERE username = ?)").run(username)
-    } catch (e) { /* ignore */ }
-
-    // 3. 确保新账号存在
-    const stmt = this.db.prepare(`
-      INSERT OR IGNORE INTO admin(username, password)
-      VALUES(?, ?)
-    `)
-    stmt.run(username, hashedPassword)
-
-    console.log('✅ Admin account initialized/updated (username: zzhi.net@gmail.com)')
+    const summary = {
+      userId: 'admin',
+      servers: count('servers'),
+      certificates: count('certificates'),
+      applyConfigs: count('cert_apply_configs'),
+      applyLogs: count('cert_apply_logs'),
+      deployLogs: count('deploy_logs'),
+      auditLogs: count('audit_logs'),
+      serverCreationLogs: count('server_creation_logs')
+    }
+    summary.total =
+      summary.servers +
+      summary.certificates +
+      summary.applyConfigs +
+      summary.applyLogs +
+      summary.deployLogs +
+      summary.auditLogs +
+      summary.serverCreationLogs
+    summary.hasData = summary.total > 0
+    return summary
   }
 
-  /**
-   * 管理员登录验证
-   */
-  verifyAdmin(username, password) {
-    const crypto = require('crypto')
-    const hashedPassword = crypto.createHash('md5').update(password).digest('hex')
+  removeDefaultAdminAccount() {
+    const defaultPasswordHash = crypto.createHash('md5').update('zhangzhi.net').digest('hex')
 
-    // 仅支持新邮箱名进行本地超级管理员验证
-    const stmt = this.db.prepare('SELECT * FROM admin WHERE username = ? AND password = ?')
-    const admin = stmt.get(username, hashedPassword)
-    return !!admin
+    try {
+      this.db.prepare(`
+        DELETE FROM admin
+        WHERE password = ?
+          AND username IN ('admin', 'zzhi.net@gmail.com')
+      `).run(defaultPasswordHash)
+    } catch (e) {
+      console.warn('Failed to remove default admin account:', e.message)
+    }
   }
 
   /**
@@ -542,6 +640,7 @@ user_id = excluded.user_id,
 
   getAllCerts(userId) {
     const effectiveUserId = userId || 'admin'
+    this.normalizeDuplicateCerts(effectiveUserId)
     const stmt = this.db.prepare("SELECT * FROM certificates WHERE user_id = ? ORDER BY expires_time ASC")
     const certs = stmt.all(effectiveUserId)
 
@@ -565,6 +664,69 @@ user_id = excluded.user_id,
         updatedAt: cert.updated_at
       }
     })
+  }
+
+  normalizeDuplicateCerts(userId) {
+    const effectiveUserId = userId || 'admin'
+    const stmt = this.db.prepare(`
+      SELECT id, domain, expires_time, apply_time, updated_at
+      FROM certificates
+      WHERE user_id = ?
+    `)
+    const rows = stmt.all(effectiveUserId)
+    const groupedRows = new Map()
+
+    for (const row of rows) {
+      const domainRows = groupedRows.get(row.domain) || []
+      domainRows.push(row)
+      groupedRows.set(row.domain, domainRows)
+    }
+
+    for (const [domain, domainRows] of groupedRows.entries()) {
+      if (domainRows.length <= 1) {
+        continue
+      }
+
+      const keepRow = domainRows.sort((left, right) => {
+        const leftExpiry = normalizeTimestampMs(left.expires_time) || 0
+        const rightExpiry = normalizeTimestampMs(right.expires_time) || 0
+        if (rightExpiry !== leftExpiry) {
+          return rightExpiry - leftExpiry
+        }
+
+        const leftApply = Number(left.apply_time) || 0
+        const rightApply = Number(right.apply_time) || 0
+        if (rightApply !== leftApply) {
+          return rightApply - leftApply
+        }
+
+        return String(right.updated_at || '').localeCompare(String(left.updated_at || ''))
+      })[0]
+
+      this.mergeDuplicateCertsByDomain(domain, keepRow.id, effectiveUserId)
+    }
+  }
+
+  getCertsByDomain(domain, userId) {
+    const effectiveUserId = userId || 'admin'
+    const stmt = this.db.prepare(`
+      SELECT * FROM certificates
+      WHERE domain = ? AND user_id = ?
+      ORDER BY apply_time DESC, updated_at DESC
+    `)
+    return stmt.all(domain, effectiveUserId).map(cert => ({
+      id: cert.id,
+      user_id: cert.user_id,
+      domain: cert.domain,
+      serverId: cert.server_id,
+      crt: decrypt(cert.crt),
+      key: decrypt(cert.key),
+      expiresTime: normalizeTimestampMs(cert.expires_time),
+      applyTime: cert.apply_time,
+      status: cert.status,
+      createdAt: cert.created_at,
+      updatedAt: cert.updated_at
+    }))
   }
 
   /**
@@ -620,12 +782,14 @@ user_id = excluded.user_id,
       throw new Error('服务器不存在或无权限访问')
     }
 
+    const normalizedCertPath = validateRemoteDeploymentPath(certPath, 'SSL 公钥路径')
+    const normalizedKeyPath = validateRemoteDeploymentPath(keyPath, 'SSL 私钥路径')
     const id = `${certId}_${serverId}_${Date.now()} `
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO cert_server_deployments(id, cert_id, server_id, cert_path, key_path, passphrase)
 VALUES(?, ?, ?, ?, ?, ?)
     `)
-    stmt.run(id, certId, serverId, certPath, keyPath, passphrase ? encrypt(passphrase) : null)
+    stmt.run(id, certId, serverId, normalizedCertPath, normalizedKeyPath, passphrase ? encrypt(passphrase) : null)
     return true
   }
 
@@ -663,6 +827,73 @@ VALUES(?, ?, ?, ?, ?, ?)
     return stmt.run(id, userId || 'admin').changes > 0
   }
 
+  mergeDuplicateCertsByDomain(domain, keepCertId, userId) {
+    const effectiveUserId = userId || 'admin'
+    const keepCert = this.getCert(keepCertId, effectiveUserId)
+    if (!keepCert || keepCert.domain !== domain) {
+      return { removedCerts: 0, movedDeployments: 0 }
+    }
+
+    const findDuplicatesStmt = this.db.prepare(`
+      SELECT id
+      FROM certificates
+      WHERE domain = ? AND user_id = ? AND id != ?
+      ORDER BY apply_time DESC, updated_at DESC
+    `)
+    const duplicateRows = findDuplicatesStmt.all(domain, effectiveUserId, keepCertId)
+
+    if (duplicateRows.length === 0) {
+      return { removedCerts: 0, movedDeployments: 0 }
+    }
+
+    const loadDeploymentsStmt = this.db.prepare(`
+      SELECT server_id, cert_path, key_path, passphrase
+      FROM cert_server_deployments
+      WHERE cert_id = ?
+      ORDER BY deployed_at DESC
+    `)
+    const insertDeploymentStmt = this.db.prepare(`
+      INSERT INTO cert_server_deployments(id, cert_id, server_id, cert_path, key_path, passphrase, deployed_at)
+      VALUES(?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(cert_id, server_id) DO NOTHING
+    `)
+    const deleteApplyConfigStmt = this.db.prepare(`
+      DELETE FROM cert_apply_configs
+      WHERE cert_id = ? AND user_id = ?
+    `)
+    const deleteCertStmt = this.db.prepare(`
+      DELETE FROM certificates
+      WHERE id = ? AND user_id = ?
+    `)
+
+    let movedDeployments = 0
+    let removedCerts = 0
+
+    const tx = this.db.transaction(() => {
+      for (const duplicate of duplicateRows) {
+        const deployments = loadDeploymentsStmt.all(duplicate.id)
+        for (const deployment of deployments) {
+          const result = insertDeploymentStmt.run(
+            `${keepCertId}_${deployment.server_id}_${duplicate.id}`,
+            keepCertId,
+            deployment.server_id,
+            deployment.cert_path,
+            deployment.key_path,
+            deployment.passphrase
+          )
+          movedDeployments += result.changes
+        }
+
+        deleteApplyConfigStmt.run(duplicate.id, effectiveUserId)
+        removedCerts += deleteCertStmt.run(duplicate.id, effectiveUserId).changes
+      }
+    })
+
+    tx()
+
+    return { removedCerts, movedDeployments }
+  }
+
   /**
    * 申请日志
    */
@@ -698,8 +929,18 @@ VALUES(?, ?, ?, ?, ?, ?)
     stmt.run(log.id, log.certId, log.serverId, log.status, log.message, effectiveUserId)
   }
 
-  getDeployLogs(limit = 50, userId) {
+  getDeployLogs(limit = 50, userId, certId = null) {
     const effectiveUserId = userId || 'admin'
+    if (certId) {
+      const stmt = this.db.prepare(`
+SELECT * FROM deploy_logs 
+      WHERE user_id = ? AND cert_id = ?
+  ORDER BY created_at DESC
+LIMIT ?
+  `)
+      return stmt.all(effectiveUserId, certId, limit)
+    }
+
     const stmt = this.db.prepare(`
 SELECT * FROM deploy_logs 
       WHERE user_id = ?
@@ -768,6 +1009,50 @@ user_id = excluded.user_id,
       accessKeyId: config.access_key_id ? decrypt(config.access_key_id) : null,
       accessKeySecret: config.access_key_secret ? decrypt(config.access_key_secret) : null
     }
+  }
+
+  getLatestCertApplyConfigByProvider(provider, userId) {
+    const effectiveUserId = userId || 'admin'
+    const stmt = this.db.prepare(`
+      SELECT * FROM cert_apply_configs
+      WHERE provider = ? AND user_id = ?
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `)
+    const config = stmt.get(provider, effectiveUserId)
+    if (!config) return null
+
+    return {
+      user_id: config.user_id,
+      certId: config.cert_id,
+      domain: config.domain,
+      email: config.email,
+      provider: config.provider,
+      accessKeyId: config.access_key_id ? decrypt(config.access_key_id) : null,
+      accessKeySecret: config.access_key_secret ? decrypt(config.access_key_secret) : null
+    }
+  }
+
+  getLatestCertApplyConfigs(userId) {
+    const effectiveUserId = userId || 'admin'
+    const configs = this.db.prepare(`
+      SELECT * FROM cert_apply_configs
+      WHERE user_id = ?
+      ORDER BY updated_at DESC
+    `).all(effectiveUserId)
+    const configsByProvider = new Map()
+
+    for (const config of configs) {
+      if (!config.provider || configsByProvider.has(config.provider)) continue
+      if (!config.access_key_id || !config.access_key_secret) continue
+      configsByProvider.set(config.provider, {
+        type: config.provider,
+        accessKeyId: decrypt(config.access_key_id),
+        accessKeySecret: decrypt(config.access_key_secret)
+      })
+    }
+
+    return Array.from(configsByProvider.values())
   }
 
   /**

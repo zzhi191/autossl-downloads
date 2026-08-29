@@ -8,3 +8,5 @@ release
 .env
 .idea
 .vscode
+.superpowers/
+.worktrees/

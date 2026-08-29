@@ -8,65 +8,85 @@ class AliyunDnsProvider {
             endpoint: 'https://alidns.aliyuncs.com',
             apiVersion: '2015-01-09'
         });
+        this.maxOperationAttempts = Number.isInteger(config.maxOperationAttempts) && config.maxOperationAttempts > 0
+            ? config.maxOperationAttempts
+            : 3;
+        this.operationRetryDelayMs = Number.isFinite(config.operationRetryDelayMs) && config.operationRetryDelayMs >= 0
+            ? config.operationRetryDelayMs
+            : 5000;
     }
 
     async createRecord({ domain, rr, value, type }) {
-        console.log(`[Aliyun] 准备解析记录 [${type}]: ${rr}.${domain} -> ${value}`);
-        
-        try {
-            // 1. 获取所有解析记录（防止模糊查询遗漏或分页问题）
-            const describeParams = {
-                "DomainName": domain,
-                "PageSize": 100,
-                "RRKeyWord": rr, // 缩小范围但仍需精细过滤
-                "Type": type
-            };
-            
-            const recordsResponse = await this.client.request('DescribeDomainRecords', describeParams, { method: 'POST' });
-            const allRecords = recordsResponse.DomainRecords?.Record || [];
-            // 处理 API 可能返回单个对象而非数组的情况
-            const records = Array.isArray(allRecords) ? allRecords : [allRecords];
+        for (let attempt = 1; attempt <= this.maxOperationAttempts; attempt += 1) {
+            console.log(`[Aliyun] 准备解析记录 [${type}]: ${rr}.${domain} -> ${value}`);
 
-            // 2. 彻底清理环境：删除所有同名同类型的旧记录
-            const matchingRecords = records.filter(r => r.RR === rr && r.Type === type);
-            if (matchingRecords.length > 0) {
-                console.log(`[Aliyun] 发现 ${matchingRecords.length} 条旧记录，开始清理...`);
-                for (const record of matchingRecords) {
-                    console.log(`[Aliyun] 正在删除旧记录: ${record.RecordId} (${record.Value})`);
-                    try {
-                        await this.client.request('DeleteDomainRecord', { "RecordId": record.RecordId }, { method: 'POST' });
-                    } catch (err) {
-                        console.warn(`[Aliyun] 删除记录 ${record.RecordId} 失败:`, err.message);
+            try {
+                // 1. 获取所有解析记录（防止模糊查询遗漏或分页问题）
+                const describeParams = {
+                    "DomainName": domain,
+                    "PageSize": 100,
+                    "RRKeyWord": rr, // 缩小范围但仍需精细过滤
+                    "Type": type
+                };
+
+                const recordsResponse = await this.client.request('DescribeDomainRecords', describeParams, { method: 'POST' });
+                const allRecords = recordsResponse.DomainRecords?.Record || [];
+                // 处理 API 可能返回单个对象而非数组的情况
+                const records = Array.isArray(allRecords) ? allRecords : [allRecords];
+
+                // 2. 彻底清理环境：删除所有同名同类型的旧记录
+                const matchingRecords = records.filter(r => r.RR === rr && r.Type === type);
+                if (matchingRecords.length > 0) {
+                    console.log(`[Aliyun] 发现 ${matchingRecords.length} 条旧记录，开始清理...`);
+                    for (const record of matchingRecords) {
+                        console.log(`[Aliyun] 正在删除旧记录: ${record.RecordId} (${record.Value})`);
+                        try {
+                            await this.client.request('DeleteDomainRecord', { "RecordId": record.RecordId }, { method: 'POST' });
+                        } catch (err) {
+                            console.warn(`[Aliyun] 删除记录 ${record.RecordId} 失败:`, err.message);
+                        }
                     }
+                    // 等待阿里云 API 状态同步
+                    console.log('[Aliyun] 等待 3 秒确保清理生效...');
+                    await new Promise(resolve => setTimeout(resolve, 3000));
                 }
-                // 等待阿里云 API 状态同步
-                console.log('[Aliyun] 等待 3 秒确保清理生效...');
-                await new Promise(resolve => setTimeout(resolve, 3000));
-            }
 
-            // 3. 添加新记录
-            const addParams = {
-                "DomainName": domain,
-                "RR": rr,
-                "Type": type,
-                "Value": value,
-                "TTL": 600
-            };
-            const result = await this.client.request('AddDomainRecord', addParams, { method: 'POST' });
-            console.log('[Aliyun] 记录已成功添加，RecordId:', result.RecordId);
-            return result;
-        } catch (e) {
-            console.error('[Aliyun] createRecord 操作失败:', e);
-            // 处理阿里云"上一个操作还未完成"的情况（参考原版 certd）
-            if (e.code === 'LastOperationNotFinished') {
-                console.log('[Aliyun] 上一个操作还未完成，5s后重试...');
-                await new Promise(resolve => setTimeout(resolve, 5000));
-                return this.createRecord({ domain, rr, value, type });
+                // 3. 添加新记录
+                const addParams = {
+                    "DomainName": domain,
+                    "RR": rr,
+                    "Type": type,
+                    "Value": value,
+                    "TTL": 600
+                };
+                const result = await this.client.request('AddDomainRecord', addParams, { method: 'POST' });
+                console.log('[Aliyun] 记录已成功添加，RecordId:', result.RecordId);
+                return result;
+            } catch (e) {
+                console.error('[Aliyun] createRecord 操作失败:', e);
+                // 阿里云在上一个操作尚未完成时，有限次数重试，避免无界递归导致调用栈溢出。
+                if (e.code === 'LastOperationNotFinished') {
+                    if (attempt === this.maxOperationAttempts) {
+                        const finalError = new Error(
+                            `阿里云 DNS 操作在 ${this.maxOperationAttempts} 次尝试后仍未完成: ${e.message}`
+                        );
+                        finalError.code = e.code;
+                        finalError.cause = e;
+                        throw finalError;
+                    }
+
+                    console.log(
+                        `[Aliyun] 上一个操作还未完成，${this.operationRetryDelayMs}ms 后重试 ` +
+                        `(${attempt + 1}/${this.maxOperationAttempts})...`
+                    );
+                    await new Promise(resolve => setTimeout(resolve, this.operationRetryDelayMs));
+                    continue;
+                }
+                if (e.code === 'Forbidden.RAM' || e.message.includes('authorized')) {
+                    throw new Error(`阿里云权限不足: 请确保已授予 AliyunDNSFullAccess 权限。详细错误: ${e.message}`);
+                }
+                throw e;
             }
-            if (e.code === 'Forbidden.RAM' || e.message.includes('authorized')) {
-                throw new Error(`阿里云权限不足: 请确保已授予 AliyunDNSFullAccess 权限。详细错误: ${e.message}`);
-            }
-            throw e;
         }
     }
 

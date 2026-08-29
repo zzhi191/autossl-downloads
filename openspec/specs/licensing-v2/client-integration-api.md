@@ -2,9 +2,9 @@
 
 ## 基础信息
 
-- **API Base URL**: `http://your-server:8055`
+- **API Base URL**: `https://tools.fogomo.com/api`
 - **认证方式**: 无需认证（公开端点）
-- **响应格式**: JSON
+- **响应格式**: JSON，生产接口外层统一为 `{ data, code, msg }`
 
 ## 客户端集成流程
 
@@ -27,48 +27,190 @@ graph TD
 ## 👤 用户注册与认证
 
 ### 1. 发送注册验证码
-**Endpoint**: `POST /auth/register/send-code`
+
+**Endpoint**: `POST /auth/send-code`
 
 **Request**:
+
 ```json
 {
-  "email": "user@example.com"
+  "email": "user@example.com",
+  "appCode": "certd-electron"
 }
 ```
 
 **Response**:
+
 ```json
 {
-  "success": true,
-  "message": "验证码已发送"
+  "data": {
+    "success": true,
+    "message": "验证码已发送"
+  },
+  "code": 200,
+  "msg": "success"
 }
 ```
 
 > **注意**: 系统已接入阿里云邮件推送 (DirectMail)。验证码将通过 `noreply@fogomo.com` 实时发送至用户邮箱。
 
-### 2. 验证并注册
-**Endpoint**: `POST /auth/register/verify`
+### 2. 检查邮箱是否已注册
 
-注册成功后，请直接使用账号密码调用 `/auth/login` 进行登录。
+**Endpoint**: `POST /auth/check-email`
 
 **Request**:
+
 ```json
 {
   "email": "user@example.com",
-  "code": "123456",
-  "password": "yourpassword"
+  "appCode": "certd-electron"
 }
 ```
 
 **Response**:
+
 ```json
 {
-  "success": true,
   "data": {
-    "user_id": "uuid-..."
-  }
+    "registered": false
+  },
+  "code": 200,
+  "msg": "success"
 }
 ```
+
+客户端登录失败后可以调用该接口区分“未注册”和“密码错误”。未注册时应引导用户到申请开通流程。
+
+### 3. 验证并注册
+
+**Endpoint**: `POST /auth/register`
+
+注册成功后，请直接使用账号密码调用 `/auth/login` 进行登录。
+
+**Request**:
+
+```json
+{
+  "email": "user@example.com",
+  "code": "123456",
+  "password": "yourpassword",
+  "machineId": "local-machine-id",
+  "appCode": "certd-electron"
+}
+```
+
+**Response**:
+
+```json
+{
+  "data": {
+    "access_token": "jwt-token",
+    "user": {
+      "id": "uuid",
+      "email": "user@example.com",
+      "role": "user",
+      "appCode": "certd-electron"
+    }
+  },
+  "code": 200,
+  "msg": "success"
+}
+```
+
+### 4. 发送密码重置验证码
+
+**Endpoint**: `POST /auth/send-reset-code`
+
+该接口只用于已注册邮箱找回密码。客户端必须携带 `appCode: "certd-electron"`，服务端返回“账号未注册”时应引导用户走申请开通流程。
+
+**Request**:
+
+```json
+{
+  "email": "user@example.com",
+  "appCode": "certd-electron"
+}
+```
+
+**Response**:
+
+```json
+{
+  "data": {
+    "success": true,
+    "message": "验证码已发送"
+  },
+  "code": 200,
+  "msg": "success"
+}
+```
+
+### 5. 重置密码
+
+**Endpoint**: `POST /auth/reset-password`
+
+验证码校验成功后，服务端更新远端账号密码。重置验证码不得用于注册流程。
+
+**Request**:
+
+```json
+{
+  "email": "user@example.com",
+  "code": "123456",
+  "password": "new-password123",
+  "appCode": "certd-electron"
+}
+```
+
+**Response**:
+
+```json
+{
+  "data": {
+    "success": true,
+    "message": "密码已重置"
+  },
+  "code": 200,
+  "msg": "success"
+}
+```
+
+### 6. 登录
+
+**Endpoint**: `POST /auth/login`
+
+**Request**:
+
+```json
+{
+  "email": "user@example.com",
+  "pass": "yourpassword",
+  "appCode": "certd-electron"
+}
+```
+
+**Response**:
+
+```json
+{
+  "data": {
+    "access_token": "jwt-token",
+    "user": {
+      "id": "uuid",
+      "email": "user@example.com",
+      "role": "user",
+      "appCode": "certd-electron"
+    },
+    "accessibleApps": [],
+    "defaultAppCode": "certd-electron",
+    "isSuperAdmin": false
+  },
+  "code": 200,
+  "msg": "success"
+}
+```
+
+客户端必须兼容 `{ data: { access_token, user } }` 的生产响应包裹。旧的 `{ access_token, user }` 裸响应只作为兼容读取。
 
 ---
 
@@ -78,6 +220,7 @@ graph TD
 客户端**必须**使用内置的RSA公钥验证该签名。
 
 **响应结构**:
+
 ```json
 {
   "success": true,
@@ -87,6 +230,7 @@ graph TD
 ```
 
 **验签流程**:
+
 1. 客户端收到响应。
 2. 提取 `data` 字段的对象。
 3. 将 `data` 对象序列化为 JSON 字符串：`const payload = JSON.stringify(response.data)`。
@@ -100,8 +244,12 @@ graph TD
 为了防止跨站脚本注入 (XSS) 和恶意代码执行，渲染进程**必须**配置合理的 Content Security Policy (CSP)。
 
 **推荐配置**:
+
 ```html
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' http://localhost:8055; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http://localhost:8055; connect-src 'self' http://localhost:8055 ws://localhost:6173;" />
+<meta
+  http-equiv="Content-Security-Policy"
+  content="default-src 'self' http://localhost:8055; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http://localhost:8055; connect-src 'self' http://localhost:8055 ws://localhost:6173;"
+/>
 ```
 
 ---
@@ -111,18 +259,22 @@ graph TD
 为了确保商业利益并提升逆向成本，系统采用了以下多重防御机制：
 
 ### 1. 通信防伪：RSA-SHA256 签名
+
 - **描述**: 服务端对所有 `data` 响应使用私钥签名，客户端通过内置公钥强验证。
 - **目的**: 防止通过篡改 Hosts 或中间人攻击 (MITM) 伪造“激活成功”的服务器响应。
 
 ### 2. 硬件绑定：动态设备指纹
+
 - **描述**: 基于 `machine-id` 和硬件特征生成唯一的 `device_id`。
 - **目的**: 限制“一码多用”。授权码在服务端会记录关联 of ID，超出套餐上限将无法再次激活。
 
 ### 3. 数据隔离：敏感字段本地加密
+
 - **描述**: 客户端本地 SQLite 中的所有 SSH 密钥、证书私钥、密码均经过对称加密存储。
 - **目的**: 防止用户直接修改本地数据库字段来实现“白嫖”专业功能。
 
 ### 4. 逻辑防线：原子化权限二次校验
+
 - **描述**: 核心自动化任务（如自动续期任务）在执行前会同步校验授权状态。
 - **目的**: 绕过 UI 层面的屏蔽无法绕过底层执行逻辑的鉴权。
 
@@ -131,11 +283,13 @@ graph TD
 ## API 详细说明
 
 ### 1. 初始化授权 (领取免费套餐)
+
 **Endpoint**: `POST /license/init`
 
 用户在客户端首次登录时调用。系统会自动检查该应用是否有默认的免费套餐，若有且用户未领取，则自动创建并绑定。
 
 **Request Body**:
+
 ```json
 {
   "app_code": "certd-electron"
@@ -143,6 +297,7 @@ graph TD
 ```
 
 **Response**:
+
 ```json
 {
   "success": true,
@@ -161,9 +316,11 @@ graph TD
 ```
 
 ### 2. 验证授权码
+
 **Endpoint**: `POST /license/verify`
 
 **请求**：
+
 ```http
 POST /license/verify
 Content-Type: application/json
@@ -176,6 +333,7 @@ Content-Type: application/json
 ```
 
 **响应**：
+
 ```json
 {
   "success": true,
@@ -194,9 +352,11 @@ Content-Type: application/json
 ```
 
 ### 3. 激活授权
+
 **Endpoint**: `POST /license/activate`
 
 **请求**：
+
 ```json
 {
   "license_key": "XXXX-XXXX-XXXX-XXXX",
@@ -208,6 +368,7 @@ Content-Type: application/json
 ```
 
 **响应**：
+
 ```json
 {
   "success": true,
@@ -222,9 +383,11 @@ Content-Type: application/json
 ```
 
 ### 4. 同步证书配置 (云端备份)
+
 **Endpoint**: `POST /license/sync-cert`
 
 **请求**：
+
 ```json
 {
   "license_id": "uuid",
@@ -235,6 +398,7 @@ Content-Type: application/json
 ```
 
 **响应**：
+
 ```json
 {
   "success": true,
@@ -246,9 +410,11 @@ Content-Type: application/json
 ```
 
 ### 5. 心跳检测与续期检查
+
 **Endpoint**: `POST /license/heartbeat`
 
 **响应**：
+
 ```json
 {
   "success": true,
@@ -261,9 +427,11 @@ Content-Type: application/json
 ```
 
 ### 6. 解绑设备
+
 **Endpoint**: `POST /license/deactivate`
 
 **响应**：
+
 ```json
 {
   "success": true,
@@ -276,39 +444,40 @@ Content-Type: application/json
 
 ## 错误码说明
 
-| 错误码 | 说明 | 处理建议 |
-|-------|------|---------|
-| `MISSING_PARAMS` | 缺少必要参数 | 检查请求参数 |
-| `INVALID_APP` | 无效的应用标识 | 检查 app_key 是否正确 |
-| `INVALID_LICENSE` | 无效的授权码 | 提示用户重新输入 |
-| `LICENSE_BLOCKED` | 授权码已被禁用 | 提示用户联系客服 |
-| `LICENSE_EXPIRED` | 授权码已过期 | 引导用户续费 |
-| `DEVICE_LIMIT_EXCEEDED` | 设备数量超限 | 引导用户解绑其他设备 |
-| `DEVICE_NOT_FOUND` | 设备未绑定 | 提示用户重新激活 |
-| `SERVER_ERROR` | 服务器错误 | 提示用户稍后重试 |
+| 错误码                  | 说明           | 处理建议              |
+| ----------------------- | -------------- | --------------------- |
+| `MISSING_PARAMS`        | 缺少必要参数   | 检查请求参数          |
+| `INVALID_APP`           | 无效的应用标识 | 检查 app_key 是否正确 |
+| `INVALID_LICENSE`       | 无效的授权码   | 提示用户重新输入      |
+| `LICENSE_BLOCKED`       | 授权码已被禁用 | 提示用户联系客服      |
+| `LICENSE_EXPIRED`       | 授权码已过期   | 引导用户续费          |
+| `DEVICE_LIMIT_EXCEEDED` | 设备数量超限   | 引导用户解绑其他设备  |
+| `DEVICE_NOT_FOUND`      | 设备未绑定     | 提示用户重新激活      |
+| `SERVER_ERROR`          | 服务器错误     | 提示用户稍后重试      |
 
 ## 客户端实现建议
 
 ### 设备指纹生成
 
 ```javascript
-const crypto = require('crypto')
-const os = require('os')
-const { machineIdSync } = require('node-machine-id')
+const crypto = require("crypto");
+const os = require("os");
+const { machineIdSync } = require("node-machine-id");
 
 function generateDeviceId() {
-  const data = [
-    machineIdSync(),
-    os.hostname(),
-    os.platform(),
-    os.arch()
-  ].join('|')
-  
-  return crypto.createHash('sha256').update(data).digest('hex')
+  const data = [machineIdSync(), os.hostname(), os.platform(), os.arch()].join(
+    "|",
+  );
+
+  return crypto.createHash("sha256").update(data).digest("hex");
 }
 ```
 
 ### 本地缓存结构
+
+本地缓存只保存软件授权状态。证书、服务器、申请配置和部署日志等业务数据保存在 Electron 本机 SQLite 中，并通过远端用户 id 作为 `user_id` 隔离。
+
+远端账号登录成功后，主进程会将历史 `user_id = "admin"` 的本机数据迁移到当前远端用户 id；该过程只改变本地归属，不删除本地证书，也不会上传证书私钥。
 
 ```javascript
 {
@@ -341,9 +510,11 @@ function generateDeviceId() {
 ## 💰 订单与支付 API
 
 ### 1. 发起下单
+
 **Endpoint**: `POST /orders/create`
 
 **请求**:
+
 ```json
 {
   "plan_id": "套餐UUID",
@@ -352,13 +523,14 @@ function generateDeviceId() {
 ```
 
 **响应**:
+
 ```json
 {
   "success": true,
   "data": {
     "order_id": "uuid",
     "order_no": "ORD...",
-    "amount": 99.00,
+    "amount": 99.0,
     "qr_code": "/assets/file_id",
     "message": "订单已创建，请扫码支付"
   },
@@ -367,9 +539,11 @@ function generateDeviceId() {
 ```
 
 ### 2. 检查支付状态
+
 **Endpoint**: `GET /orders/check/:order_id`
 
 **响应**:
+
 ```json
 {
   "success": true,
@@ -382,7 +556,9 @@ function generateDeviceId() {
 ```
 
 ### 3. 后端自动化逻辑 (订单钩子)
+
 后端会自动监听订单状态。当状态变更为 `paid` 时：
+
 - **自动延期**: 如果用户已有授权，将在现有有效期基础上顺延（例如增加 12 个月）。
 - **自动创建**: 如果是新邮箱用户，将自动创建一个新的 `pro` 计划授权。
 - **即时生效**: 客户端在下次验证授权或收到支付成功通知后刷新，即可获得专业版权限。

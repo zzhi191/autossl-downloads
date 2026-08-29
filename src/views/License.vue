@@ -118,20 +118,31 @@
             <h2>推荐订阅方案</h2>
             <div class="header-line"></div>
           </div>
-          
           <div class="plan-grid">
             <div 
-              v-for="p in plans" 
+              v-for="(p, index) in plans" 
               :key="p.id" 
               class="plan-glass-card" 
               :class="{ 
-                hot: p.price > 100,
-                disabled: !isPlanAvailable(p)
+                hot: isRecommendedPlan(index),
+                disabled: !getPlanAction(p).available,
+                current: getPlanAction(p).type === 'renew'
               }" 
               @click="handleBuy(p)"
             >
-              <div v-if="p.price > 100" class="hot-badge">推荐</div>
-              <div v-if="!isPlanAvailable(p)" class="status-overlay">当前方案更优</div>
+              <div v-if="isRecommendedPlan(index)" class="hot-badge">推荐</div>
+              <div v-if="getPlanAction(p).badge" class="status-overlay">
+                <span>{{ getPlanAction(p).badge }}</span>
+                <button
+                  v-if="getPlanAction(p).type === 'upgrade'"
+                  type="button"
+                  class="upgrade-help-btn"
+                  aria-label="查看升级后总权益"
+                  @click.stop="showUpgradeInfo(p)"
+                >
+                  <QuestionCircleOutlined />
+                </button>
+              </div>
               <div class="p-header">
                 <span class="p-name">{{ p.name }}</span>
               </div>
@@ -139,6 +150,9 @@
                 <span class="sym">¥</span>
                 <span class="amt">{{ p.price }}</span>
                 <span class="dur">/年</span>
+              </div>
+              <div v-if="getPlanAction(p).description" class="p-action-note">
+                {{ getPlanAction(p).description }}
               </div>
               <ul class="p-features">
                 <li><CheckOutlined class="check" /> 证书额度: {{ p.constraints?.max_certs || 0 }} 个</li>
@@ -151,9 +165,9 @@
                 block 
                 size="large" 
                 class="choose-btn"
-                :disabled="!isPlanAvailable(p)"
+                :disabled="!getPlanAction(p).available"
               >
-                {{ isPlanAvailable(p) ? (license?.plan === p.code ? '支付续费' : '立即订阅') : '已拥有' }}
+                {{ getPlanAction(p).buttonText }}
               </a-button>
             </div>
           </div>
@@ -190,6 +204,45 @@
         </div>
       </a-modal>
 
+      <a-modal
+        v-model:open="upgradeInfoVisible"
+        title="升级后总权益"
+        :footer="null"
+        width="520px"
+        centered
+      >
+        <div v-if="upgradePreview" class="upgrade-preview">
+          <div class="upgrade-summary">
+            <div>
+              <span class="summary-label">当前方案</span>
+              <strong>{{ upgradePreview.currentName }}</strong>
+            </div>
+            <div class="summary-arrow">→</div>
+            <div>
+              <span class="summary-label">升级后方案</span>
+              <strong>{{ upgradePreview.targetName }}</strong>
+            </div>
+          </div>
+
+          <div class="upgrade-benefit-list">
+            <div class="benefit-row">
+              <span>证书自动化上限</span>
+              <strong>{{ upgradePreview.currentCerts }} → {{ upgradePreview.targetCerts }} 个</strong>
+            </div>
+            <div class="benefit-row">
+              <span>服务器节点上限</span>
+              <strong>{{ upgradePreview.currentServers }} → {{ upgradePreview.targetServers }} 台</strong>
+            </div>
+            <div class="benefit-row">
+              <span>功能权益</span>
+              <strong>自动续期、SSH 同步、多域名解析、API 接入</strong>
+            </div>
+          </div>
+
+          <p class="upgrade-note">升级后按新套餐额度作为总权益生效，不与当前额度叠加。</p>
+        </div>
+      </a-modal>
+
       <!-- 支付弹窗 -->
       <a-modal
         v-model:open="payModalVisible"
@@ -204,7 +257,11 @@
           <div class="qr-wrapper">
              <div class="qr-container">
                <QRCodeVue3 v-if="payUrl" :value="payUrl" :width="200" :height="200" :dots-options="{ type: 'rounded', color: '#1a365d' }" />
-               <a-spin v-else size="large" />
+               <div v-else-if="payLoading" class="qr-loading"><a-spin size="large" /></div>
+               <div v-else class="qr-error">
+                 <p>二维码加载失败</p>
+                 <a-button type="primary" size="small" @click="retryCreateOrder">重试</a-button>
+               </div>
              </div>
              <div class="qr-corner tl"></div><div class="qr-corner tr"></div><div class="qr-corner bl"></div><div class="qr-corner br"></div>
           </div>
@@ -226,7 +283,7 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted, computed } from 'vue';
-import { message } from 'ant-design-vue';
+import { message, Modal } from 'ant-design-vue';
 import { 
   CrownFilled, 
   CopyOutlined, 
@@ -238,13 +295,14 @@ import {
   ThunderboltFilled,
   GlobalOutlined,
   CloudServerOutlined,
-  ApiFilled
+  ApiFilled,
+  QuestionCircleOutlined
 } from '@ant-design/icons-vue';
 import MainLayout from '@/components/MainLayout.vue';
 import dayjs from 'dayjs';
 import axios from 'axios';
 import QRCodeVue3 from 'qrcode-vue3';
-import { normalizeLicensePlans } from '@/utils/license-plans.mjs';
+import { normalizeLicensePlans, unwrapLicenseApiResponse } from '@/utils/license-plans.mjs';
 
 const API_BASE = 'https://tools.fogomo.com/api';
 
@@ -257,6 +315,7 @@ const plans = ref([]);
 const currentStats = ref({ servers: 0, certs: 0 });
 
 const faqVisible = ref(false);
+const upgradeInfoVisible = ref(false);
 
 const showFAQ = () => { faqVisible.value = true; };
 const showContact = () => {
@@ -275,7 +334,9 @@ const showTerms = () => {
 // 支付相关
 const payModalVisible = ref(false);
 const payUrl = ref('');
+const payLoading = ref(false);
 const selectedPlan = ref(null);
+const selectedUpgradePlan = ref(null);
 const checkingPay = ref(false);
 const payOrderNo = ref('');
 let payPollingTimer = null;
@@ -371,56 +432,185 @@ const copyMachineId = () => {
   message.success('设备指纹已复制到剪贴板');
 };
 
-const isPlanAvailable = (plan) => {
-  if (!license.value || !license.value.plan || license.value.plan === 'free') return true;
-  const currentMax = license.value.constraints?.max_certs || 0;
-  const targetMax = plan.constraints?.max_certs || 0;
-  // 允许升级（额度更大）或续费（相同额度/代码）
-  return targetMax >= currentMax;
+const getPlanLimits = (source) => ({
+  certs: source?.constraints?.max_certs || 0,
+  servers: source?.constraints?.max_servers || 0
+});
+
+const isRecommendedPlan = (index) => {
+  return plans.value.length > 0 && index === Math.floor(plans.value.length / 2);
+};
+
+const upgradePreview = computed(() => {
+  if (!selectedUpgradePlan.value) return null;
+  const current = getPlanLimits(license.value);
+  const target = getPlanLimits(selectedUpgradePlan.value);
+  return {
+    currentName: planName.value,
+    targetName: selectedUpgradePlan.value.name,
+    currentCerts: current.certs,
+    targetCerts: target.certs,
+    currentServers: current.servers,
+    targetServers: target.servers
+  };
+});
+
+const showUpgradeInfo = (plan) => {
+  selectedUpgradePlan.value = plan;
+  upgradeInfoVisible.value = true;
+};
+
+const getPlanAction = (plan) => {
+  if (!license.value || !license.value.plan || license.value.plan === 'free') {
+    return {
+      type: 'subscribe',
+      available: true,
+      buttonText: '立即订阅',
+      description: '开通后按该套餐额度生效'
+    };
+  }
+
+  if (license.value.plan === 'lifetime') {
+    return {
+      type: 'blocked',
+      available: false,
+      buttonText: '无需购买',
+      badge: '已是终身授权',
+      description: '当前授权已覆盖长期使用'
+    };
+  }
+
+  const current = getPlanLimits(license.value);
+  const target = getPlanLimits(plan);
+  const samePlan = license.value.plan === plan.code;
+  const higherLimits = target.certs > current.certs || target.servers > current.servers;
+  const lowerLimits = target.certs < current.certs || target.servers < current.servers;
+
+  if (lowerLimits) {
+    return {
+      type: 'blocked',
+      available: false,
+      buttonText: '当前方案更优',
+      badge: '当前方案更优',
+      description: '低于当前授权额度，不能降级购买'
+    };
+  }
+
+  if (higherLimits) {
+    return {
+      type: 'upgrade',
+      available: true,
+      buttonText: '升级方案',
+      badge: samePlan ? '升级额度' : '可升级',
+      description: '升级后按新套餐额度生效，不与原额度叠加'
+    };
+  }
+
+  return {
+    type: 'renew',
+    available: true,
+    buttonText: '续费当前方案',
+    badge: samePlan ? '当前方案' : '可续费',
+    description: '续费只延长有效期，不叠加资源额度'
+  };
+};
+
+const getCloudAuthToken = () => {
+  const token = localStorage.getItem('token');
+  return token && token.trim() ? token : null;
+};
+
+const handleCloudAuthExpired = () => {
+  localStorage.removeItem('token');
+  window.dispatchEvent(new Event('cloud-auth-changed'));
+  message.warning('订阅支付需要有效的云端登录状态，请使用注册邮箱登录后再试。');
 };
 
 const handleBuy = async (plan) => {
-  if (!isPlanAvailable(plan)) {
-    message.info('您当前已拥有更高级别的授权，无需降级购买');
+  const action = getPlanAction(plan);
+  if (!action.available) {
+    message.info(action.description || '您当前已拥有更高级别的授权，无需降级购买');
     return;
   }
-  const token = localStorage.getItem('token');
+  const token = getCloudAuthToken();
   if (!token) {
-    message.warning('请先登录账户');
+    message.warning('订阅支付需要云端登录，请使用注册邮箱登录后再试。');
     return;
   }
-  selectedPlan.value = plan;
-  payModalVisible.value = true;
-  payUrl.value = '';
-  try {
-    const res = await axios.post(`${API_BASE}/certd-electron/electron/license/create-order`, {
-      planId: plan.id,
-      amount: plan.price,
-      deviceId: machineId.value
-    }, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    if (res.data.success) {
-      payOrderNo.value = res.data.data.orderNo;
-      payUrl.value = res.data.data.payUrl;
-      startPayPolling();
+
+  const createOrder = async () => {
+    selectedPlan.value = plan;
+    payModalVisible.value = true;
+    payUrl.value = '';
+    payLoading.value = true;
+    try {
+      const res = await axios.post(`${API_BASE}/certd-electron/electron/license/create-order`, {
+        planId: plan.id,
+        amount: plan.price,
+        deviceId: machineId.value
+      }, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 15000
+      });
+      const responseData = unwrapLicenseApiResponse(res.data);
+      if (responseData?.success) {
+        payOrderNo.value = responseData.data.orderNo;
+        payUrl.value = responseData.data.payUrl;
+        startPayPolling();
+      } else {
+        message.error(responseData?.message || '订单创建失败');
+        payModalVisible.value = false;
+      }
+    } catch (e) {
+      if (e.response?.status === 401) {
+        handleCloudAuthExpired();
+        payModalVisible.value = false;
+        return;
+      }
+      const errMsg = e.response?.data?.message || (e.code === 'ECONNABORTED' ? '请求超时，请检查网络' : '订单创建失败');
+      message.error(errMsg);
+      payModalVisible.value = false;
+    } finally {
+      payLoading.value = false;
     }
-  } catch (e) {
-    const errMsg = e.response?.data?.message || '订单创建失败';
-    message.error(errMsg);
-    payModalVisible.value = false;
+  };
+
+  const retryCreateOrder = () => {
+    createOrder();
+  };
+
+  if (action.type === 'renew' || action.type === 'upgrade') {
+    Modal.confirm({
+      title: action.type === 'renew' ? '确认续费当前方案？' : '确认升级授权方案？',
+      content: action.type === 'renew'
+        ? '续费会延长当前授权有效期，资源额度保持当前方案额度，不会叠加。'
+        : '升级后会按新套餐额度生效，资源额度不会与当前授权累加。',
+      okText: '确认支付',
+      cancelText: '取消',
+      onOk: createOrder
+    });
+    return;
   }
+
+  createOrder();
 };
 
 const checkPaymentStatus = async (isManual = false) => {
   if (!payOrderNo.value) return;
   if (isManual) checkingPay.value = true;
   try {
-    const token = localStorage.getItem('token');
+    const token = getCloudAuthToken();
+    if (!token) {
+      if (isManual) {
+        message.warning('云端登录已失效，请重新登录后再查询支付状态。');
+      }
+      return;
+    }
     const res = await axios.get(`${API_BASE}/certd-electron/electron/license/query-order/${payOrderNo.value}${isManual ? '?manual=true' : ''}`, {
       headers: { Authorization: `Bearer ${token}` }
     });
-    if (res.data.status === 'paid') {
+    const responseData = unwrapLicenseApiResponse(res.data);
+    if (responseData?.status === 'paid') {
       message.success('支付成功，授权已开通！');
       stopPayPolling();
       // 延迟 2 秒刷新，防止后端数据同步延迟
@@ -432,6 +622,12 @@ const checkPaymentStatus = async (isManual = false) => {
       message.info('尚未收到支付结果，请支付后重试');
     }
   } catch (e) {
+    if (e.response?.status === 401) {
+      handleCloudAuthExpired();
+      stopPayPolling();
+      payModalVisible.value = false;
+      return;
+    }
     console.error(e);
   } finally {
     if (isManual) checkingPay.value = false;
@@ -758,8 +954,8 @@ onUnmounted(() => {
 
 .plan-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 24px;
 }
 
 .plan-glass-card {
@@ -788,17 +984,44 @@ onUnmounted(() => {
   filter: grayscale(0.5);
 }
 
+.plan-glass-card.current {
+  border-color: #f59e0b;
+}
+
 .status-overlay {
   position: absolute;
-  top: 16px;
+  top: 48px;
   right: 16px;
   background: #64748b;
   color: white;
-  padding: 4px 12px;
+  padding: 4px 8px 4px 12px;
   border-radius: 20px;
   font-size: 11px;
   font-weight: 700;
   z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1;
+}
+
+.upgrade-help-btn {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.22);
+  color: white;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.upgrade-help-btn:hover {
+  background: rgba(255, 255, 255, 0.36);
 }
 
 .plan-glass-card.hot {
@@ -824,6 +1047,14 @@ onUnmounted(() => {
 .p-pricing .amt { font-size: 38px; color: #ef4444; font-weight: 900; line-height: 1; margin: 0 2px; }
 .p-pricing .dur { color: #94a3b8; font-size: 13px; font-weight: 600; }
 
+.p-action-note {
+  min-height: 36px;
+  margin: -12px 0 18px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .p-features {
   list-style: none;
   padding: 0;
@@ -842,12 +1073,88 @@ onUnmounted(() => {
 
 .p-features .check { color: #10b981; font-weight: 900; }
 
+.upgrade-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.upgrade-summary {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 16px;
+  padding: 16px;
+  border-radius: 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+
+.summary-label {
+  display: block;
+  margin-bottom: 4px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.summary-arrow {
+  color: #1890ff;
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.upgrade-benefit-list {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.benefit-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  color: #475569;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.benefit-row:last-child {
+  border-bottom: 0;
+}
+
+.benefit-row strong {
+  color: #1e293b;
+  text-align: right;
+}
+
+.upgrade-note {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .choose-btn {
   height: 52px;
   border-radius: 12px;
   font-weight: 800;
   font-size: 16px;
   box-shadow: 0 4px 15px rgba(24, 144, 255, 0.2);
+}
+
+@media (max-width: 1180px) {
+  .plan-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .plan-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .bottom-links {
@@ -892,6 +1199,26 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+  min-height: 220px;
+}
+
+.qr-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 200px;
+  height: 200px;
+}
+
+.qr-error {
+  text-align: center;
+  color: #ef4444;
+  font-size: 14px;
+  padding: 20px;
+}
+
+.qr-error p {
+  margin: 0 0 12px;
 }
 
 .qr-corner { position: absolute; width: 24px; height: 24px; border: 4px solid #1890ff; }

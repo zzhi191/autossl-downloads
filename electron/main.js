@@ -1,11 +1,16 @@
 const { app, BrowserWindow, ipcMain, dialog, Notification } = require('electron')
 const path = require('path')
+const fs = require('fs')
 const CertdDatabase = require('./db')
 const AcmeService = require('./services/acme-service')
 const SshService = require('./services/ssh-service')
 const CertService = require('./services/cert-service')
 const AutoRenewService = require('./services/auto-renew-service')
 const LicenseService = require('./services/license-service')
+const {
+  getProviderCredentials,
+  saveProviderCredentials
+} = require('./services/dns-provider-credentials')
 // const Store = require('electron-store') // Removed
 
 // ==================== 状态维护 ====================
@@ -25,7 +30,16 @@ async function getUserStore() {
 // 存储 IPC
 ipcMain.handle('profile:get-all', async () => {
   const store = await getUserStore()
-  return store.get('accessProfiles', [])
+  const userId = currentUser?.id?.toString() || 'default'
+  const verifiedProfiles = certdDB?.getLatestCertApplyConfigs(userId) || []
+  return verifiedProfiles.length > 0 ? verifiedProfiles : store.get('accessProfiles', [])
+})
+
+ipcMain.handle('profile:get-by-provider', async (event, provider) => {
+  const store = await getUserStore()
+  const userId = currentUser?.id?.toString() || 'default'
+  const fallbackConfig = certdDB?.getLatestCertApplyConfigByProvider(provider, userId)
+  return getProviderCredentials(store, provider, fallbackConfig)
 })
 
 ipcMain.handle('profile:save', async (event, profile) => {
@@ -39,6 +53,7 @@ ipcMain.handle('profile:save', async (event, profile) => {
     profiles.push(profile)
   }
   store.set('accessProfiles', profiles)
+  saveProviderCredentials(store, profile)
   return true
 })
 
@@ -99,6 +114,14 @@ process.on('uncaughtException', (error) => {
   }
   try {
     console.error('Uncaught Exception:', error)
+  } catch (e) {
+    // 静默处理
+  }
+})
+
+process.on('unhandledRejection', (reason) => {
+  try {
+    console.error('Unhandled Rejection:', reason)
   } catch (e) {
     // 静默处理
   }
@@ -184,21 +207,30 @@ function createWindow() {
   })
 }
 
-app.whenReady().then(() => {
-  // 先初始化数据库
-  initDatabase()
+app.whenReady().then(async () => {
+  try {
+    // 先初始化数据库
+    initDatabase()
 
-  // 再创建窗口
-  createWindow()
+    // 再创建窗口
+    createWindow()
 
-  // 初始化自动续期服务
-  AutoRenewService.init(certdDB, AcmeService, SshService, () => currentUser?.id?.toString() || 'default')
+    // 初始化自动续期服务
+    AutoRenewService.init(certdDB, AcmeService, SshService, () => currentUser?.id?.toString() || 'default')
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow()
-    }
-  })
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow()
+      }
+    })
+  } catch (error) {
+    console.error('Failed to initialize application:', error)
+    dialog.showErrorBox(
+      'AutoSSL 启动失败',
+      error?.message || '应用初始化失败，请检查数据库或原生依赖配置。'
+    )
+    app.quit()
+  }
 })
 
 // IPC: 手动触发证书续期检查
@@ -215,7 +247,9 @@ ipcMain.handle('auto-renew:check', async () => {
 
 ipcMain.handle('auto-renew:renew-cert', async (event, certId) => {
   const userId = currentUser?.id?.toString() || 'default'
-  return await AutoRenewService.renewNow(certId, userId, currentUser?.email || '')
+  return await AutoRenewService.renewNow(certId, userId, currentUser?.email || '', (progress) => {
+    event.sender.send('auto-renew:progress', progress)
+  })
 })
 
 ipcMain.handle('auto-renew:last-run', () => {
@@ -239,22 +273,23 @@ ipcMain.handle('log:audit', (event, limit) => {
 // 用户会话管理
 ipcMain.handle('user:set-session', (event, user) => {
   currentUser = user
+  if (certdDB && user?.id && user.id.toString() !== 'admin') {
+    const userId = user.id.toString()
+    certdDB.claimLegacyData(userId)
+  }
   safeLog('👤 Current user session set:', user?.email || 'None')
   return true
+})
+
+ipcMain.handle('user:get-local-data-summary', () => {
+  if (!certdDB) return { hasData: false, total: 0 }
+  return certdDB.getLocalAdminDataSummary()
 })
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
   }
-})
-
-// ==================== IPC 处理 ====================
-
-// 管理员登录
-ipcMain.handle('admin:login', (event, username, password) => {
-  if (!certdDB) return false
-  return certdDB.verifyAdmin(username, password)
 })
 
 // ==================== 服务器管理 ====================
@@ -356,23 +391,12 @@ ipcMain.handle('cert:save', async (event, cert) => {
     if (ownerUserId && ownerUserId !== userId) {
       return { success: false, error: '该证书ID已被其他账户占用' }
     }
-    // 保存证书本身不消耗配额吗？通常 acme:apply 消耗配额。
-    // 手动导入证书 (saveCert) 是否消耗配额？
-    // 如果是手动导入，也可以算作 quota。
-
     // 检查是否已存在
     const existing = certdDB.getCert(cert.id, userId);
     if (!existing) {
-      const certUsage = certdDB.getCertUsageCount(userId);
-      // 注意：这里我们使用 Loose check，因为 acme:apply 已经检查过了。
-      // 如果是手动导入 (Feature)，也应该检查。
-      const canAdd = await LicenseService.checkConstraint('max_certs', certUsage);
+      const currentCertCount = certdDB.getAllCerts(userId).length;
+      const canAdd = await LicenseService.checkConstraint('max_certs', currentCertCount);
       if (!canAdd) {
-        // 如果是 ACME 申请流程调用的 saveCert，通常 acme:apply 已经检查了。
-        // 但如果是纯手动导入，这里会拦截。
-        // 为了避免 ACME 流程被二次拦截 (race condition?), 我们假设 ACME 流程能通过。
-        // 实际上 ACME apply 先 check，然后生成 key，然后 destroy limits...
-        // 简单起见，这里也检查。
         return { success: false, error: '当前套餐证书数量已达上限，请升级专业版' };
       }
     }
@@ -405,11 +429,19 @@ ipcMain.handle('cert:get-expiring', (event, days) => {
 })
 
 ipcMain.handle('cert:delete', (event, id) => {
-  if (!certdDB) return false
+  if (!certdDB) return { success: false, error: 'Database not initialized' }
   const userId = currentUser?.id?.toString() || 'default'
 
   // 先获取信息用于日志
   const cert = certdDB.getCert(id, userId)
+  if (!cert) {
+    return { success: false, error: '证书不存在' }
+  }
+
+  if (!cert.expiresTime || cert.expiresTime > Date.now()) {
+    return { success: false, error: '生效中的证书不允许删除，只有已过期证书才可以删除' }
+  }
+
   const result = certdDB.deleteCert(id, userId)
 
   if (result && cert) {
@@ -421,7 +453,7 @@ ipcMain.handle('cert:delete', (event, id) => {
     }, userId)
   }
 
-  return result
+  return { success: result, error: result ? null : '删除操作失败' }
 })
 
 ipcMain.handle('cert:get-config', (event, domain) => {
@@ -478,18 +510,30 @@ ipcMain.handle('cert:check-expiry', (event, certId) => {
 // ==================== 证书申请 ====================
 
 ipcMain.handle('acme:apply', async (event, { domain, email, dnsProvider }) => {
+  let applyStage = '初始化申请'
   try {
     const userId = currentUser?.id?.toString() || 'default'
-    // 权限检查 (基于历史成功申请记录)
-    const certUsage = certdDB.getCertUsageCount(userId);
-    const canApply = await LicenseService.checkConstraint('max_certs', certUsage);
+    // 权限检查：按当前已保存证书数量计算
+    applyStage = '检查证书配额'
+    const currentCertCount = certdDB.getAllCerts(userId).length;
+    const canApply = await LicenseService.checkConstraint('max_certs', currentCertCount);
     if (!canApply) {
-      return { success: false, error: '当前套餐证书申请数量已达上限 (包含历史记录)，请升级专业版' };
+      return { success: false, error: '当前套餐证书数量已达上限，请删除不用的证书或升级专业版' };
     }
 
+    applyStage = '加载本地申请配置'
     const store = await getUserStore()
 
     // 1. 确保有持久化的 ACME 账户密钥（防止 429 报错）
+    applyStage = '准备 ACME 账户密钥'
+
+    // @certd/basic 默认把日志写入相对路径 ./logs/app.log。
+    // macOS 从 Finder 启动时工作目录可能是 /，会触发 streamroller 的
+    // mkdir 递归并最终报 Maximum call stack size exceeded。
+    const userDataPath = app.getPath('userData')
+    fs.mkdirSync(path.join(userDataPath, 'logs'), { recursive: true })
+    process.chdir(userDataPath)
+
     let acmeAccount = store.get('acmeAccount', null)
     if (!acmeAccount || !acmeAccount.key) {
       safeLog('Generating initial ACME account key...')
@@ -500,6 +544,7 @@ ipcMain.handle('acme:apply', async (event, { domain, email, dnsProvider }) => {
     }
 
     // 2. 调用申请服务
+    applyStage = '执行 ACME 证书申请'
     const result = await AcmeService.applyCert(domain, email, dnsProvider, (progress) => {
       event.sender.send('acme:progress', progress)
     }, acmeAccount)
@@ -540,6 +585,11 @@ ipcMain.handle('acme:apply', async (event, { domain, email, dnsProvider }) => {
       }, userId)
       safeLog('Certificate apply config saved for auto-renewal')
 
+      const mergeResult = certdDB.mergeDuplicateCertsByDomain(domain, result.certId, userId)
+      if (mergeResult.removedCerts > 0) {
+        safeLog(`Merged ${mergeResult.removedCerts} duplicate certificate record(s) for ${domain}`)
+      }
+
       // 4. 同步配置到云端
       LicenseService.syncCertConfig({
         domain,
@@ -555,9 +605,13 @@ ipcMain.handle('acme:apply', async (event, { domain, email, dnsProvider }) => {
       LicenseService.report(domain, true, '证书申请成功').catch(() => { });
     }
 
-    return { success: true, data: result }
+    return { success: true, data: result, message: result.message || '证书申请成功' }
   } catch (error) {
-    safeLog('Apply cert error:', error)
+    const errorMessage = error?.message || String(error)
+    const errorStack = error?.stack || ''
+    const detailedError = `[${applyStage}] ${errorMessage}`
+    safeLog('Apply cert error:', detailedError)
+    if (errorStack) safeLog(errorStack)
 
     // 保存错误日志 (失败不计入 quota)
     if (certdDB) {
@@ -566,11 +620,11 @@ ipcMain.handle('acme:apply', async (event, { domain, email, dnsProvider }) => {
         id: Date.now().toString(),
         domain,
         status: 'error',
-        message: error.message
+        message: `${detailedError}${errorStack ? `\n${errorStack}` : ''}`
       }, userId)
     }
 
-    return { success: false, error: error.message }
+    return { success: false, error: detailedError }
   }
 })
 
@@ -624,28 +678,30 @@ ipcMain.handle('deploy:cert', async (event, certId, serverId, certPath, keyPath,
     safeLog('Deploying to server:', server.name, {
       hasPassword: !!server.password,
       hasPrivateKey: !!server.privateKey,
-      privateKeyLength: server.privateKey ? server.privateKey.length : 0,
-      privateKeyPrefix: server.privateKey ? server.privateKey.substring(0, 20) : 'none',
-      hasPassphrase: !!deployPassphrase,
-      passphraseLength: deployPassphrase ? deployPassphrase.length : 0
+      hasPrivateKeyPath: !!server.privateKeyPath,
+      hasPassphrase: !!deployPassphrase
     })
 
     // 部署证书
     const result = await SshService.deployCert(deployServer, cert)
 
     // 保存部署日志
+    const deployedMessage = result?.paths
+      ? `部署成功: ${server.name}${result.paths.certPath ? ` | cert=${result.paths.certPath}` : ''}${result.paths.keyPath ? ` | key=${result.paths.keyPath}` : ''}`
+      : `部署成功: ${server.name}`
+
     certdDB.addDeployLog({
       id: Date.now().toString(),
       certId,
       serverId,
       status: 'success',
-      message: '部署成功'
+      message: deployedMessage
     }, userId)
 
     // 上报部署成功
-    LicenseService.report(cert.domain, true, `部署成功: ${server.name}`).catch(() => { });
+    LicenseService.report(cert.domain, true, deployedMessage).catch(() => { });
 
-    return { success: true, data: result }
+    return { success: true, data: result, message: deployedMessage }
   } catch (error) {
     safeLog('Deploy cert error:', error)
 
@@ -673,10 +729,10 @@ ipcMain.handle('log:apply', (event, limit) => {
   return certdDB.getApplyLogs(limit || 50, userId)
 })
 
-ipcMain.handle('log:deploy', (event, limit) => {
+ipcMain.handle('log:deploy', (event, limit, certId) => {
   if (!certdDB) return []
   const userId = currentUser?.id?.toString() || 'default'
-  return certdDB.getDeployLogs(limit || 50, userId)
+  return certdDB.getDeployLogs(limit || 50, userId, certId || null)
 })
 
 // ==================== 退出应用 ====================

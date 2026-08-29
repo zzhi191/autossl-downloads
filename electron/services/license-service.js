@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const os = require('os');
+const normalizeLicenseResponse = require('./license-response');
 
 const STORE_KEY = 'license_data';
 const OFFLINE_GRACE_DAYS = 7;
@@ -177,8 +178,9 @@ class LicenseService {
 
       console.log('[License] Cloud response:', res.data);
 
-      if (res.data.success) {
-        const { data, signature } = res.data;
+      const payload = normalizeLicenseResponse(res.data);
+      if (payload?.success) {
+        const { data, signature } = payload;
         if (this.verifySignature(data, signature)) {
           const license = this.stampVerifiedLicense({ licenseKey: data.license_key, ...data });
           this.store.set(STORE_KEY, license);
@@ -190,7 +192,7 @@ class LicenseService {
         }
       }
 
-      const message = res.data?.message || '';
+      const message = payload?.message || '';
       if (/no active license found/i.test(message)) {
         this.store.delete(STORE_KEY);
         console.log('[License] Cleared stale local cache after explicit no-license response');
@@ -243,8 +245,9 @@ class LicenseService {
         device_id: this.machineId
       });
 
-      if (res.data.success) {
-        const { data, signature } = res.data;
+      const payload = normalizeLicenseResponse(res.data);
+      if (payload?.success) {
+        const { data, signature } = payload;
         if (this.verifySignature(data, signature)) {
           const license = this.stampVerifiedLicense({ licenseKey: key, ...data });
           this.store.set(STORE_KEY, license);
@@ -272,8 +275,9 @@ class LicenseService {
         platform: process.platform
       });
 
-      if (res.data.success) {
-        const { data, signature } = res.data;
+      const payload = normalizeLicenseResponse(res.data);
+      if (payload?.success) {
+        const { data, signature } = payload;
         if (this.verifySignature(data, signature)) {
           const verified = await this.verify(licenseKey);
           if (verified.valid) {
@@ -287,7 +291,7 @@ class LicenseService {
       return {
         valid: false,
         success: false,
-        reason: res.data?.message || 'activation_failed'
+        reason: normalizeLicenseResponse(res.data)?.message || 'activation_failed'
       };
     } catch (e) {
       const reason = e.response?.data?.message || e.message;

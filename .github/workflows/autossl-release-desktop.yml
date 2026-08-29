@@ -48,10 +48,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Replace local plugin-lib dependency for CI
-        run: |
-          node -e "const fs=require('fs'); const pkg=require('./package.json'); pkg.dependencies['@certd/plugin-lib']='1.37.7'; fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');"
-
       - name: Install dependencies
         run: npm install
 
@@ -73,8 +69,6 @@ jobs:
     runs-on: macos-14
     permissions:
       contents: read
-    env:
-      CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
     steps:
       - name: Checkout
@@ -92,15 +86,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Replace local plugin-lib dependency for CI
-        run: |
-          node -e "const fs=require('fs'); const pkg=require('./package.json'); pkg.dependencies['@certd/plugin-lib']='1.37.7'; fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');"
-
       - name: Install dependencies
         run: npm install
 
       - name: Build macOS bundles
-        run: npm run electron:build:mac
+        run: npm run electron:release:mac
 
       - name: Upload macOS bundles
         uses: actions/upload-artifact@v4
@@ -144,11 +134,11 @@ jobs:
           prerelease: false
           name: AutoSSL ${{ needs.prepare.outputs.release_tag }}
           body: |
-            Unsigned desktop bundle for AutoSSL.
+            Desktop bundle for AutoSSL.
 
             Included artifacts:
             - Windows NSIS installer (.exe)
-            - macOS installer (.dmg)
+            - macOS DMG installer (.dmg)
             - macOS archive (.zip)
             - Electron updater metadata (.yml, .blockmap)
           files: |

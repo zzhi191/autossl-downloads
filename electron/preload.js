@@ -12,7 +12,6 @@ contextBridge.exposeInMainWorld('electron', {
     invoke: (channel, ...args) => {
       // 白名单允许的 IPC 通道
       const allowedChannels = [
-        'admin:login',
         'server:save',
         'server:get',
         'server:get-all',
@@ -34,6 +33,7 @@ contextBridge.exposeInMainWorld('electron', {
         'dialog:open-file',
         'dialog:select-path',
         'profile:get-all',
+        'profile:get-by-provider',
         'profile:save',
         'profile:save-draft',
         'profile:get-draft',
@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld('electron', {
         'auto-renew:last-run',
         'log:get-apply',
         'user:set-session',
+        'user:get-local-data-summary',
         'quit-app',
         'close-window'
       ]
@@ -56,7 +57,7 @@ contextBridge.exposeInMainWorld('electron', {
       throw new Error(`IPC channel "${channel}" is not allowed`)
     },
     on: (channel, func) => {
-      const allowedEvents = ['acme:progress']
+      const allowedEvents = ['acme:progress', 'auto-renew:progress']
       if (allowedEvents.includes(channel)) {
         const subscription = (event, ...args) => func(...args)
         ipcRenderer.on(channel, subscription)

@@ -46,6 +46,20 @@ test('normalizeLicensePlans falls back to empty array for malformed payloads', a
   assert.deepEqual(normalizeLicensePlans({ data: { success: true, data: {} } }), [])
 })
 
+test('unwrapLicenseApiResponse supports the server response envelope', async () => {
+  const { unwrapLicenseApiResponse } = await import(
+    pathToFileURL(path.resolve(__dirname, '../src/utils/license-plans.mjs')).href
+  )
+
+  const orderResponse = { success: true, data: { orderNo: 'LIZ-001' } }
+
+  assert.deepEqual(
+    unwrapLicenseApiResponse({ data: orderResponse, code: 200, msg: 'success' }),
+    orderResponse
+  )
+  assert.equal(unwrapLicenseApiResponse(orderResponse), orderResponse)
+})
+
 test('renderer CSP should not include unsafe-eval', () => {
   assert.doesNotMatch(
     indexHtml,

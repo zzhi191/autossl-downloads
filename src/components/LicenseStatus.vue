@@ -11,7 +11,7 @@
         <CrownOutlined v-else-if="isPro" />
         <InfoCircleOutlined v-else />
       </template>
-      {{ planName }}
+      {{ badgeLabel }}
     </a-tag>
 
     <a-modal
@@ -124,7 +124,7 @@ import { CrownOutlined, InfoCircleOutlined, CheckCircleFilled, ReloadOutlined, C
 import dayjs from 'dayjs'
 import axios from 'axios'
 import QRCodeVue3 from 'qrcode-vue3'
-import { normalizeLicensePlans } from '@/utils/license-plans.mjs'
+import { normalizeLicensePlans, unwrapLicenseApiResponse } from '@/utils/license-plans.mjs'
 
 const SERVER_BASE = 'https://tools.fogomo.com'
 
@@ -156,6 +156,11 @@ const planName = computed(() => {
   if (licenseInfo.value.plan_name) return licenseInfo.value.plan_name
   if (isPro.value) return '专业版'
   return '免费版'
+})
+
+const badgeLabel = computed(() => {
+  if (!licenseInfo.value) return '验证中'
+  return isPro.value ? '已授权' : '免费版'
 })
 
 const statusColor = computed(() => {
@@ -243,14 +248,25 @@ const isPlanAvailable = (plan) => {
   return targetMax >= currentMax;
 };
 
+const getCloudAuthToken = () => {
+  const token = localStorage.getItem('token')
+  return token && token.trim() ? token : null
+}
+
+const handleCloudAuthExpired = () => {
+  localStorage.removeItem('token')
+  window.dispatchEvent(new Event('cloud-auth-changed'))
+  message.warning('订阅支付需要有效的云端登录状态，请使用注册邮箱登录后再试。')
+}
+
 const handleBuy = async (plan) => {
   if (!isPlanAvailable(plan)) {
     message.info('您当前已拥有更高级别的授权');
     return;
   }
-  const token = localStorage.getItem('token')
+  const token = getCloudAuthToken()
   if (!token) {
-    message.warning('请先登录账户以进行购买')
+    message.warning('订阅支付需要云端登录，请使用注册邮箱登录后再试。')
     return
   }
 
@@ -262,34 +278,48 @@ const handleBuy = async (plan) => {
     }, {
       headers: { Authorization: `Bearer ${token}` }
     })
-    
-    if (res.data.success) {
+    const responseData = unwrapLicenseApiResponse(res.data)
+
+    if (responseData?.success) {
       currentOrder.value = {
-        ...res.data.data,
+        ...responseData.data,
         amount: plan.price,
-        order_no: res.data.data.orderNo,
-        qr_code: res.data.data.payUrl
+        order_no: responseData.data.orderNo,
+        qr_code: responseData.data.payUrl
       }
       showPaymentModal.value = true
-      startPolling(res.data.data.orderNo)
+      startPolling(responseData.data.orderNo)
+    } else {
+      message.error(responseData?.message || '创建订单失败')
     }
   } catch (e) {
-    message.error('创建订单失败')
+    if (e.response?.status === 401) {
+      handleCloudAuthExpired()
+      return
+    }
+    message.error(e.response?.data?.message || '创建订单失败')
   }
 }
 
 
 const checkPaymentStatus = async (orderId, isManual = false) => {
   if (isManual) checkingPay.value = true
-  const token = localStorage.getItem('token')
+  const token = getCloudAuthToken()
+  if (!token) {
+    if (isManual) {
+      message.warning('云端登录已失效，请重新登录后再查询支付状态。')
+    }
+    return
+  }
   
   try {
     const url = `${SERVER_BASE}/api/certd-electron/electron/license/query-order/${orderId}` + (isManual ? '?manual=true' : '')
     const res = await axios.get(url, {
       headers: { Authorization: `Bearer ${token}` }
     })
-    
-    if (res.data.status === 'paid') {
+    const responseData = unwrapLicenseApiResponse(res.data)
+
+    if (responseData?.status === 'paid') {
       orderPaid.value = true
       clearInterval(pollTimer)
       message.success('支付成功，授权已自动升级！')
@@ -301,6 +331,12 @@ const checkPaymentStatus = async (orderId, isManual = false) => {
        if (isManual) message.info('订单待支付')
     }
   } catch (e) {
+    if (e.response?.status === 401) {
+      handleCloudAuthExpired()
+      stopPolling()
+      showPaymentModal.value = false
+      return
+    }
     console.error('Polling error:', e)
   } finally {
     if (isManual) checkingPay.value = false

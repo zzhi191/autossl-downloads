@@ -13,29 +13,52 @@ import { onMounted, ref } from 'vue'
 
 const appReady = ref(false)
 
+const hasElectronApi = () => Boolean(window.electron?.ipcRenderer)
+
+const clearStoredSession = () => {
+  localStorage.removeItem('isLoggedIn')
+  localStorage.removeItem('user')
+  localStorage.removeItem('token')
+}
+
+const isLocalAdminSession = (user) => {
+  return user?.id === 'admin' || user?.email === 'admin' || user?.mode === 'local'
+}
+
+const setUserSession = async (user) => {
+  await window.electron.ipcRenderer.invoke('user:set-session', user)
+  localStorage.setItem('isLoggedIn', 'true')
+  localStorage.setItem('user', JSON.stringify(user))
+}
+
 const restoreSession = async () => {
+  if (!hasElectronApi()) return
+
   const isLoggedIn = localStorage.getItem('isLoggedIn') === 'true'
   const userStr = localStorage.getItem('user')
 
   if (isLoggedIn && userStr) {
     try {
       const user = JSON.parse(userStr)
-      await window.electron.ipcRenderer.invoke('user:set-session', user)
+      if (isLocalAdminSession(user)) {
+        clearStoredSession()
+        await window.electron.ipcRenderer.invoke('user:set-session', null)
+        return
+      }
+      await setUserSession(user)
       return
     } catch (e) {
       console.error('Recover session error:', e)
     }
-  }
-
-  if (isLoggedIn) {
-    await window.electron.ipcRenderer.invoke('user:set-session', { id: 'admin', email: 'admin' })
   }
 }
 
 onMounted(async () => {
   try {
     await restoreSession()
-    await window.electron.ipcRenderer.invoke('license:init')
+    if (hasElectronApi()) {
+      await window.electron.ipcRenderer.invoke('license:init')
+    }
   } catch (e) {
     console.error('App bootstrap error:', e)
   } finally {

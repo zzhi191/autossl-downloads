@@ -1,6 +1,6 @@
 # autoSSL Release Guide
 
-`autoSSL` 目前已经支持在 GitHub 上针对 macOS 和 Windows 平台完成构建、产物下载和 draft release 生成。
+`autoSSL` 目前已经支持在 GitHub 上针对 macOS 和 Windows 平台完成构建、产物下载和 draft release 生成。当前 macOS 目标是生成可安装的 DMG，不发布 Mac App Store。
 
 这份文档专门说明发布相关流程，README 里只保留入口和简版说明。
 
@@ -113,7 +113,7 @@ release_tag = autossl-v1.0.0
 
 1. 先确认 `.github/workflows/autossl-windows-build.yml` 至少成功跑过一次
 2. 再确认 `.github/workflows/autossl-macos-build.yml` 也至少成功跑过一次
-3. 确认当前仓库在 GitHub Windows 和 macOS runner 上都能稳定打包
+3. 本地或 CI 确认 `npm run release:check` 通过
 4. 选择 tag 发布或手动发布
 5. 等 workflow 完成后，到 GitHub Releases 页面查看 draft release
 6. 下载 release 附件，至少分别做一次本机安装验证
@@ -128,29 +128,14 @@ release_tag = autossl-v1.0.0
 - 构建结果可通过 Artifacts 下载
 - 可通过 tag 或手动输入 tag 生成双平台 draft release
 - release 附件包含两个平台的安装包和升级元数据
+- macOS release 会生成可安装的 DMG 和 ZIP
 
 当前仍然要注意：
 
-- 生成的是 **unsigned desktop release**
-- 还没有接入 Windows 签名证书
-- 还没有接入 macOS 签名和 notarization
-- 更适合测试分发和内部验证，不等于已完成正式签名发布
-
-## CI 依赖说明
-
-当前 `autoSSL/package.json` 在本地开发中引用了：
-
-```json
-"@certd/plugin-lib": "file:../packages/plugins/plugin-lib"
-```
-
-由于当前仓库没有把这个本地目录一起提交到 GitHub Actions 环境里，CI 中会临时改用 npm 上已发布的 `@certd/plugin-lib@1.37.7` 完成桌面打包。
-
-这意味着：
-
-- 本地开发仍保留 `file:` 依赖体验
-- CI 通过已发布 npm 版本兜底
-- 后续如果 monorepo 结构或发布策略调整，可以再统一收敛
+- 当前不发布 Mac App Store
+- 未签名/未公证的 DMG 可以安装，但首次打开可能触发 macOS Gatekeeper 提示
+- 如果后续要减少 Gatekeeper 提示，可以再配置 Developer ID 签名和 notarization；项目保留了 `npm run release:check:mac:signed` 作为可选检查
+- Windows 签名证书尚未接入；对外分发 Windows 安装包前可再补 Windows code signing
 
 ## 延伸阅读
 
@@ -164,7 +149,7 @@ release_tag = autossl-v1.0.0
 
 ## English Quick Guide
 
-`autoSSL` can now build both macOS and Windows packages on GitHub and generate a draft release for download and internal testing.
+`autoSSL` can now build both macOS and Windows packages on GitHub and generate a draft release. The current macOS target is a directly installable DMG, not a Mac App Store release.
 
 This section is a short English reference for collaborators who do not read the Chinese release notes.
 
@@ -255,23 +240,13 @@ What is already covered:
 - Build outputs are downloadable from Artifacts
 - Draft releases can be created by tag or manual trigger
 - Release assets include installers and update metadata for both platforms
+- macOS release builds produce a DMG and ZIP
 
 What is not covered yet:
 
-- The desktop packages are still **unsigned**
 - No Windows code signing certificate has been integrated yet
-- No macOS signing or notarization has been integrated yet
-- The current setup is good for internal testing and controlled distribution, but it is not a fully signed production release flow
-
-### CI Dependency Note
-
-`autoSSL/package.json` currently uses this local dependency during development:
-
-```json
-"@certd/plugin-lib": "file:../packages/plugins/plugin-lib"
-```
-
-Because that local path is not available in the GitHub Actions environment, CI temporarily switches to the published npm package `@certd/plugin-lib@1.37.7` for desktop builds.
+- The macOS DMG may be unsigned and may trigger Gatekeeper on first launch
+- Optional Developer ID signing and notarization can be added later if smoother public installation is needed
 
 ### Related Article
 

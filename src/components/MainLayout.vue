@@ -117,10 +117,14 @@ const loadUserInfo = () => {
     } catch (e) {
       console.error('Failed to parse user info', e)
     }
-  } else if (localStorage.getItem('isLoggedIn') === 'true') {
-    // 可能是管理员登录
-    currentUser.value = { email: 'admin' }
   }
+}
+
+const clearLocalSession = async () => {
+  await window.electron.ipcRenderer.invoke('user:set-session', null)
+  localStorage.removeItem('isLoggedIn')
+  localStorage.removeItem('token')
+  localStorage.removeItem('user')
 }
 
 // 根据当前路由设置选中的菜单项
@@ -163,10 +167,7 @@ const handleMenuClick = ({ key }) => {
 }
 
 const handleLogout = async () => {
-  await window.electron.ipcRenderer.invoke('user:set-session', null)
-  localStorage.removeItem('isLoggedIn')
-  localStorage.removeItem('token')
-  localStorage.removeItem('user')
+  await clearLocalSession()
   message.success('已退出登录')
   router.push('/')
 }
@@ -386,4 +387,3 @@ const handleLogout = async () => {
   letter-spacing: 0.5px;
 }
 </style>
-
