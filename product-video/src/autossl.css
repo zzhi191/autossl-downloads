@@ -1,0 +1,26 @@
+.video-root { background: #06192f; color: #eff8ff; font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif; overflow: hidden; }
+.scene { padding: 118px 140px; }
+.scene-grid { position: absolute; inset: 0; opacity: .18; }
+.scene-copy { position: absolute; top: 158px; left: 140px; width: 720px; z-index: 2; }
+.eyebrow { color: #72c5ff; font-size: 26px; font-weight: 800; letter-spacing: 8px; margin-bottom: 30px; }
+.scene-title { font-size: 72px; font-weight: 750; line-height: 1.18; letter-spacing: 0; max-width: 720px; }
+.scene-detail { margin-top: 28px; color: #b7d6ec; font-size: 31px; line-height: 1.45; }
+.scene-visual { position: absolute; inset: 100px 110px 100px 860px; display: flex; align-items: center; justify-content: center; }
+.scene-control { background: #082038; }
+.scene-request { background: #0a364d; }
+.scene-deploy { background: #0b414c; }
+.scene-protect { background: #103e35; }
+.scene-end { background: #07192d; }
+.certificate-card { display: flex; align-items: center; gap: 18px; padding: 24px 28px; border: 1px solid #74c8ff8a; border-radius: 14px; background: #0d2c48; box-shadow: 0 24px 65px #00000040; }
+.certificate-mark { display: grid; place-items: center; width: 46px; height: 46px; color: #073254; background: #79d5ff; border-radius: 50%; font-size: 28px; font-weight: 900; }
+.certificate-label { font-size: 26px; font-weight: 800; }
+.certificate-meta { margin-top: 5px; color: #91b6d2; font-size: 17px; }
+.problem-visual, .control-visual, .request-visual, .deploy-visual, .protect-visual, .end-visual { position: relative; width: 100%; min-height: 520px; display: flex; align-items: center; justify-content: center; }
+.alert-orbit { position: absolute; width: 390px; height: 390px; border: 1px solid #64c1ff; border-radius: 50%; box-shadow: 0 0 0 42px #64c1ff0d; }
+.task-chip { position: absolute; padding: 13px 19px; border: 1px solid #3976a4; border-radius: 22px; background: #0b2944; color: #a3d6fa; font-size: 19px; }
+.task-chip-one { top: 86px; right: 55px; }.task-chip-two { bottom: 72px; left: 42px; }.task-chip-three { bottom: 52px; right: 18px; }
+.control-visual { gap: 25px; }.entity-card { position: relative; z-index: 1; min-width: 168px; padding: 21px; border: 1px solid #4b8ab4; border-radius: 12px; background: #0b2a45; color: #d9efff; font-size: 23px; text-align: center; transition: none; }.central-card { min-width: 255px; padding: 0; }.central-card .certificate-card { border-color: #73d7ff; }.connector { position: absolute; top: 50%; height: 2px; background: #58b5e9; }.connector-left { left: 6%; }.connector-right { right: 6%; }
+.domain-hero { color: #eaf7ff; font-size: 43px; font-weight: 750; }.validation-line { position: absolute; top: 303px; width: 82%; height: 8px; border-radius: 20px; background: #12445e; overflow: hidden; }.validation-line > div { height: 100%; border-radius: inherit; background: #6ed1f5; }.validation-steps { position: absolute; top: 340px; width: 84%; display: flex; justify-content: space-between; color: #b7def0; font-size: 19px; }
+.deploy-visual { gap: 38px; }.deploy-path { width: 250px; height: 7px; background: #175a66; border-radius: 10px; overflow: hidden; }.deploy-path > div { height: 100%; background: #87ead9; }.server-stack { display: grid; gap: 14px; }.server-node { padding: 15px 28px; border: 1px solid #5fb3a8; border-radius: 8px; background: #0c3b43; color: #cef9f0; font-weight: 700; letter-spacing: 1px; }
+.health-ring { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 15px; width: 315px; height: 315px; border: 16px solid #61d99c; border-radius: 50%; color: #ecfff4; box-shadow: 0 0 0 20px #61d99c1a; }.health-check { display: grid; place-items: center; width: 68px; height: 68px; border-radius: 50%; background: #61d99c; color: #123e35; font-size: 44px; font-weight: 900; }.health-ring strong { font-size: 32px; }.health-ring span { color: #a9d9c2; font-size: 18px; }.renewal-chip { position: absolute; top: 100px; right: 22px; padding: 14px 20px; border-radius: 20px; background: #17634f; color: #e3fff2; font-size: 18px; }
+.end-visual { flex-direction: column; gap: 34px; }.brand-lockup { display: flex; align-items: center; gap: 22px; }.brand-shield { width: 92px; height: 92px; object-fit: contain; }.brand-wordmark { color: #f3f9ff; font-size: 92px; font-weight: 800; }.brand-wordmark span { color: #72c5ff; }.brand-rule { width: 430px; height: 2px; background: #4da9e1; }

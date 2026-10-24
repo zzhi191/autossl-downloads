@@ -1,0 +1,69 @@
+name: AutoSSL Windows Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+    paths:
+      - '.github/workflows/autossl-windows-build.yml'
+      - '**'
+  pull_request:
+    paths:
+      - '.github/workflows/autossl-windows-build.yml'
+      - '**'
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build renderer
+        run: npm run build
+
+      - name: Rebuild native modules for Electron
+        env:
+          npm_config_runtime: electron
+          npm_config_target: 44.0.0
+          npm_config_arch: x64
+          npm_config_dist_url: https://electronjs.org/headers
+          npm_config_build_from_source: 'true'
+        run: npm rebuild better-sqlite3
+
+      - name: Disable electron-builder internal npm rebuild
+        run: node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.build.npmRebuild=false;fs.writeFileSync('package.json',JSON.stringify(p,null,2))"
+
+      - name: Build Windows installer
+        run: npm run electron:build:win
+
+      - name: Upload Windows bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: autossl-windows-bundle
+          path: |
+            dist-electron/*.exe
+            dist-electron/*.blockmap
+            dist-electron/latest*.yml
+          if-no-files-found: error
