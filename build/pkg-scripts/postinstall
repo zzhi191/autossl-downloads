@@ -1,0 +1,13 @@
+#!/bin/sh
+set -u
+
+APP="/Applications/AutoSSL.app"
+if [ ! -d "$APP" ] && [ -n "${3:-}" ] && [ -d "${3%/}/Applications/AutoSSL.app" ]; then
+  APP="${3%/}/Applications/AutoSSL.app"
+fi
+
+if [ -d "$APP" ]; then
+  xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+fi
+
+exit 0

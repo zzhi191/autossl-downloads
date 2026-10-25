@@ -1,0 +1,136 @@
+{
+  "name": "auto-ssl",
+  "version": "1.0.3",
+  "description": "AutoSSL - 自动化证书管理",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "electron:dev": "bash scripts/cleanup-dev.sh && concurrently \"vite\" \"wait-on http://localhost:6173 && env -u ELECTRON_RUN_AS_NODE NODE_PRESERVE_SYMLINKS=1 electron .\"",
+    "electron:build": "vite build && electron-builder --publish never",
+    "electron:build:mac": "vite build && electron-builder --publish never --mac dmg zip pkg",
+    "electron:build:win": "vite build && electron-builder --publish never --win nsis",
+    "release:check": "node scripts/releaseCheck.js",
+    "release:check:mac": "node scripts/releaseCheck.js --mac",
+    "release:check:mac:signed": "node scripts/releaseCheck.js --mac-signed",
+    "electron:release:mac": "npm run release:check:mac && vite build && electron-builder --publish never --mac dmg zip pkg",
+    "preview": "vite preview",
+    "start": "bash start.sh",
+    "restart": "bash start.sh",
+    "kill": "bash scripts/cleanup-dev.sh && (lsof -ti:6173 | xargs kill -9 || true)"
+  },
+  "keywords": [
+    "auto-ssl",
+    "electron",
+    "vue3",
+    "certificate-management"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@alicloud/pop-core": "^1.8.0",
+    "@ant-design/icons-vue": "^7.0.1",
+    "@certd/acme-client": "^1.38.2",
+    "@huaweicloud/huaweicloud-sdk-core": "^3.1.184",
+    "@huaweicloud/huaweicloud-sdk-dns": "^3.1.184",
+    "@peculiar/x509": "^1.14.3",
+    "ant-design-vue": "^4.2.6",
+    "asn1js": "^3.0.7",
+    "axios": "^1.6.5",
+    "better-sqlite3": "^13.0.1",
+    "crypto-js": "^4.2.0",
+    "electron-store": "^11.0.2",
+    "lodash-es": "^4.17.23",
+    "node-machine-id": "^1.1.12",
+    "pinia": "^2.1.7",
+    "psl": "^1.15.0",
+    "qrcode-vue3": "^1.7.1",
+    "ssh2": "^1.15.0",
+    "tencentcloud-sdk-nodejs": "^4.1.176",
+    "vue": "^3.4.0",
+    "vue-router": "^4.6.3"
+  },
+  "devDependencies": {
+    "@types/chai": "^5.2.3",
+    "@types/lodash-es": "^4.17.12",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^25.0.10",
+    "@vitejs/plugin-vue": "^5.0.3",
+    "concurrently": "^8.2.2",
+    "dayjs": "^1.11.19",
+    "electron": "^44.0.0",
+    "electron-builder": "^26.15.3",
+    "iconv-lite": "^0.7.2",
+    "kill-port": "^2.0.1",
+    "log4js": "^6.9.1",
+    "lru-cache": "^11.2.4",
+    "mitt": "^3.0.1",
+    "nanoid": "^5.1.6",
+    "sass": "^1.69.0",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.3",
+    "wait-on": "^7.2.0"
+  },
+  "overrides": {
+    "nodemailer": "^9.0.3",
+    "uuid": "^11.1.1"
+  },
+  "build": {
+    "appId": "com.autossl.client",
+    "productName": "AutoSSL",
+    "beforeBuild": "scripts/electronBeforeBuild.js",
+    "afterPack": "scripts/electronAfterPack.js",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "!electron/node_modules"
+    ],
+    "asarUnpack": [
+      "**/*.node"
+    ],
+    "mac": {
+      "category": "public.app-category.utilities",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "target": [
+        "dmg",
+        "zip",
+        "pkg"
+      ],
+      "icon": "build/icon.icns"
+    },
+    "pkg": {
+      "scripts": "pkg-scripts"
+    },
+    "dmg": {
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ],
+      "window": {
+        "width": 540,
+        "height": 380
+      },
+      "title": "安装 证书管理客户端"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "build/icon.png"
+    }
+  }
+}
